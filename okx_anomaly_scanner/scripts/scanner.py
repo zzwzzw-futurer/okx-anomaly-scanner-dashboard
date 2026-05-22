@@ -732,6 +732,84 @@ def latest_funding(conn: sqlite3.Connection, inst_id: str) -> sqlite3.Row | None
     ).fetchone()
 
 
+def latest_indicator(conn: sqlite3.Connection, inst_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM indicator_snapshots
+        WHERE inst_id = ?
+        ORDER BY ts DESC
+        LIMIT 1
+        """,
+        (inst_id,),
+    ).fetchone()
+
+
+def base_asset_from_inst(inst_id: str) -> str:
+    return inst_id.split("-", 1)[0].upper()
+
+
+def sentiment_label_from_score(score: float) -> str:
+    if score >= 1:
+        return "positive"
+    if score <= -1:
+        return "negative"
+    return "neutral"
+
+
+def recent_news_sentiment(conn: sqlite3.Connection, inst_id: str, now_ms: int, lookback_hours: int) -> dict[str, Any]:
+    base = base_asset_from_inst(inst_id)
+    cutoff = now_ms - lookback_hours * 60 * 60_000
+    rows = conn.execute(
+        """
+        SELECT source, title, link, published_ms, sentiment_score, sentiment_label, matched_assets_json
+        FROM news_sentiment_snapshots
+        WHERE COALESCE(published_ms, ts) >= ?
+        ORDER BY COALESCE(published_ms, ts) DESC
+        LIMIT 120
+        """,
+        (cutoff,),
+    ).fetchall()
+    asset_rows: list[sqlite3.Row] = []
+    market_rows: list[sqlite3.Row] = []
+    for row in rows:
+        try:
+            assets = [str(asset).upper() for asset in json.loads(row["matched_assets_json"] or "[]")]
+        except json.JSONDecodeError:
+            assets = []
+        if base in assets:
+            asset_rows.append(row)
+        elif not assets:
+            market_rows.append(row)
+    target = asset_rows or market_rows[:12]
+    score = sum(float(row["sentiment_score"] or 0) for row in target)
+    counts = {"positive": 0, "negative": 0, "neutral": 0}
+    for row in target:
+        label = row["sentiment_label"] or "neutral"
+        counts[label if label in counts else "neutral"] += 1
+    return {
+        "base_asset": base,
+        "scope": "asset" if asset_rows else "market",
+        "score": score,
+        "label": sentiment_label_from_score(score),
+        "positive_count": counts["positive"],
+        "negative_count": counts["negative"],
+        "neutral_count": counts["neutral"],
+        "headline_count": len(target),
+        "headlines": [
+            {
+                "source": row["source"],
+                "title": row["title"],
+                "link": row["link"],
+                "published_ms": row["published_ms"],
+                "sentiment_label": row["sentiment_label"],
+                "sentiment_score": row["sentiment_score"],
+            }
+            for row in target[:3]
+        ],
+    }
+
+
 def pct_change(current: float | None, previous: float | None) -> float | None:
     if current is None or previous in (None, 0):
         return None
@@ -767,6 +845,7 @@ def volume_delta_stats(conn: sqlite3.Connection, inst_id: str) -> tuple[float | 
 
 def compute_metrics(
     conn: sqlite3.Connection,
+    config: dict[str, Any],
     row: dict[str, Any],
     oi_by_inst: dict[str, dict[str, Any]],
     now_ms: int,
@@ -799,14 +878,162 @@ def compute_metrics(
     if funding:
         metrics["funding_rate"] = funding["funding_rate"]
         metrics["funding_time"] = funding["funding_time"]
+    indicator = latest_indicator(conn, inst_id)
+    if indicator:
+        metrics.update(
+            {
+                "indicator_ts": indicator["ts"],
+                "indicator_age_minutes": (now_ms - int(indicator["ts"])) / 60_000,
+                "indicator_bar": indicator["bar"],
+                "indicator_close": indicator["close"],
+                "indicator_sample_count": indicator["sample_count"],
+                "rsi14": indicator["rsi14"],
+                "ema12": indicator["ema12"],
+                "ema26": indicator["ema26"],
+                "macd": indicator["macd"],
+                "macd_signal": indicator["macd_signal"],
+                "macd_hist": indicator["macd_hist"],
+            }
+        )
+    lookback_hours = int(config.get("news_sentiment", {}).get("score_lookback_hours", 12))
+    news = recent_news_sentiment(conn, inst_id, now_ms, lookback_hours)
+    metrics.update(
+        {
+            "news_sentiment_scope": news["scope"],
+            "news_sentiment_score": news["score"],
+            "news_sentiment_label": news["label"],
+            "news_positive_count": news["positive_count"],
+            "news_negative_count": news["negative_count"],
+            "news_neutral_count": news["neutral_count"],
+            "news_headline_count": news["headline_count"],
+            "news_headlines": news["headlines"],
+        }
+    )
     return metrics
+
+
+def metric_value(metrics: dict[str, Any], key: str) -> float | None:
+    return to_float(metrics.get(key))
+
+
+def build_strategy_plan(config: dict[str, Any], alert: dict[str, Any]) -> dict[str, Any]:
+    strategy_cfg = config.get("strategy", {})
+    execution_cfg = config.get("execution", {})
+    metrics = alert["metrics"]
+    last = metric_value(metrics, "last")
+    direction = alert.get("direction") or "neutral"
+    price_5m = metric_value(metrics, "price_change_5m_pct") or 0.0
+    oi_5m = metric_value(metrics, "oi_delta_5m_pct") or 0.0
+    volume_ratio = metric_value(metrics, "volume_ratio") or 0.0
+    funding = metric_value(metrics, "funding_rate") or 0.0
+    risk_pct = float(strategy_cfg.get("risk_per_trade_pct", 0.25))
+    max_risk_pct = float(strategy_cfg.get("max_risk_per_trade_pct", 0.5))
+    max_leverage = float(strategy_cfg.get("max_leverage", 2))
+    hot = abs(price_5m) >= 6 or abs(oi_5m) >= 10 or volume_ratio >= 10
+    stop_pct = 0.055 if hot else 0.035
+    tp1_pct = 0.055 if hot else 0.035
+    tp2_pct = 0.115 if hot else 0.075
+    execution_mode = execution_cfg.get("mode", "dry_run")
+    venue = execution_cfg.get("venue", "hyperliquid")
+    if last is None or last <= 0:
+        return {
+            "bias": "observe",
+            "venue": venue,
+            "execution_mode": execution_mode,
+            "summary": "价格数据不足，只观察不执行。",
+            "entry_scenarios": [],
+            "risk": f"单笔账户风险建议 {risk_pct:.2f}%-{max_risk_pct:.2f}%，默认不自动下单。",
+        }
+
+    if direction == "down":
+        bias = "short"
+        entry_break = last * 0.99
+        rebound_low = last * 1.015
+        rebound_high = last * 1.035
+        invalidation = last * (1 + stop_pct)
+        stop = invalidation
+        tp1 = last * (1 - tp1_pct)
+        tp2 = last * (1 - tp2_pct)
+        risk_note = (
+            "若 funding 明显为负，空头可能拥挤，优先等反抽失败再做。"
+            if funding < -0.003
+            else "若下跌伴随 OI 回落，可能是去杠杆尾段，避免急跌追空。"
+        )
+        entry_scenarios = [
+            f"右侧：跌破 {entry_break:.8g} 后，反抽 {rebound_low:.8g}-{rebound_high:.8g} 不收回再考虑。",
+            "保守：等待下一根 5分钟K 低点下移且 OI 不再快速回补。",
+        ]
+    elif direction == "up":
+        bias = "long"
+        breakout = last * (1.018 if hot else 1.01)
+        pullback_low = last * (1 - (0.055 if hot else 0.035))
+        pullback_high = last * (1 - (0.025 if hot else 0.018))
+        invalidation = last * (1 - stop_pct)
+        stop = invalidation
+        tp1 = last * (1 + tp1_pct)
+        tp2 = last * (1 + tp2_pct)
+        risk_note = (
+            "funding 偏高时多头拥挤，优先回踩确认，不追涨。"
+            if funding > 0.003
+            else "价格与 OI 同步扩张时偏多，但仍以确认信号入场。"
+        )
+        entry_scenarios = [
+            f"右侧：放量站稳 {breakout:.8g} 后小仓确认。",
+            f"保守：回踩 {pullback_low:.8g}-{pullback_high:.8g} 区间企稳再考虑。",
+        ]
+    else:
+        return {
+            "bias": "observe",
+            "venue": venue,
+            "execution_mode": execution_mode,
+            "summary": "方向投票不足，只进入观察队列。",
+            "entry_scenarios": ["等待价格、OI、指标至少三层同向后再评估。"],
+            "risk": f"单笔账户风险建议 {risk_pct:.2f}%-{max_risk_pct:.2f}%，默认不自动下单。",
+        }
+
+    return {
+        "bias": bias,
+        "venue": venue,
+        "execution_mode": execution_mode,
+        "summary": f"{alert['inst_id']} {bias} 候选；分数 {alert['score']}，执行前仍需确认盘口和滑点。",
+        "levels": {
+            "reference_last": last,
+            "stop_loss": stop,
+            "tp1": tp1,
+            "tp2": tp2,
+        },
+        "entry_scenarios": entry_scenarios,
+        "invalidation": f"价格触及或收盘越过 {invalidation:.8g}，策略失效。",
+        "stop_loss": f"参考止损 {stop:.8g}；实盘按账户权益和风险百分比反推仓位。",
+        "take_profit": [f"TP1 {tp1:.8g}", f"TP2 {tp2:.8g}", "TP1 后至少减仓一半并移动止损到成本附近。"],
+        "sizing": (
+            f"默认单笔风险 {risk_pct:.2f}% 账户权益，硬上限 {max_risk_pct:.2f}%；"
+            f"杠杆不超过 {max_leverage:.1f}x，并受 execution.max_position_usd 限制。"
+        ),
+        "risk": risk_note,
+        "no_trade_conditions": [
+            "盘口深度不足或预计滑点超过计划止损的 20%。",
+            "信号出现 10 分钟后价格已远离入场区。",
+            "同方向已有仓位或当日亏损触发熔断。",
+        ],
+    }
 
 
 def classify_alert(config: dict[str, Any], row: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any] | None:
     thresholds = config["thresholds"]
     score = 0
+    score_components: list[dict[str, Any]] = []
     signals: list[str] = []
     direction = "neutral"
+    bullish_layers: set[str] = set()
+    bearish_layers: set[str] = set()
+
+    def add_score(points: int, signal: str, layer: str, detail: str = "") -> None:
+        nonlocal score
+        score += points
+        signals.append(signal)
+        score_components.append({"points": points, "signal": signal, "layer": layer, "detail": detail})
+
     price_5m = metrics.get("price_change_5m_pct")
     price_15m = metrics.get("price_change_15m_pct")
     price_1h = metrics.get("price_change_1h_pct")
@@ -815,17 +1042,27 @@ def classify_alert(config: dict[str, Any], row: dict[str, Any], metrics: dict[st
     oi_5m = metrics.get("oi_delta_5m_pct")
     oi_15m = metrics.get("oi_delta_15m_pct")
     funding = metrics.get("funding_rate")
+    rsi14 = metrics.get("rsi14")
+    ema12 = metrics.get("ema12")
+    ema26 = metrics.get("ema26")
+    macd_hist = metrics.get("macd_hist")
+    news_score = metrics.get("news_sentiment_score")
 
     if price_5m is not None and abs(price_5m) >= thresholds["price_change_5m_pct"]:
-        score += 25
+        add_score(25, f"price_5m_{'up' if price_5m > 0 else 'down'}", "ticker", f"{price_5m:+.2f}%")
         direction = "up" if price_5m > 0 else "down"
-        signals.append(f"price_5m_{direction}")
+        (bullish_layers if price_5m > 0 else bearish_layers).add("ticker")
     if price_15m is not None and abs(price_15m) >= thresholds["price_change_15m_pct"]:
-        score += 25
-        signals.append("price_15m_breakout" if price_15m > 0 else "price_15m_breakdown")
+        add_score(
+            25,
+            "price_15m_breakout" if price_15m > 0 else "price_15m_breakdown",
+            "ticker",
+            f"{price_15m:+.2f}%",
+        )
+        (bullish_layers if price_15m > 0 else bearish_layers).add("ticker")
     if price_1h is not None and abs(price_1h) >= thresholds["price_change_1h_pct"]:
-        score += 15
-        signals.append("price_1h_trend")
+        add_score(15, "price_1h_trend", "ticker", f"{price_1h:+.2f}%")
+        (bullish_layers if price_1h > 0 else bearish_layers).add("ticker")
 
     if (
         volume_ratio is not None
@@ -833,38 +1070,78 @@ def classify_alert(config: dict[str, Any], row: dict[str, Any], metrics: dict[st
         and volume_ratio >= thresholds["volume_ratio"]
         and volume_delta >= thresholds["min_volume_delta_usd_5m"]
     ):
-        score += 20
-        signals.append("volume_spike")
+        add_score(20, "volume_spike", "ticker", f"ratio={volume_ratio:.2f} delta={volume_delta:.0f}")
 
     if oi_5m is not None and abs(oi_5m) >= thresholds["oi_delta_5m_pct"]:
-        score += 25
-        signals.append("oi_5m_up" if oi_5m > 0 else "oi_5m_down")
+        add_score(25, "oi_5m_up" if oi_5m > 0 else "oi_5m_down", "open_interest", f"{oi_5m:+.2f}%")
     if oi_15m is not None and abs(oi_15m) >= thresholds["oi_delta_15m_pct"]:
-        score += 15
-        signals.append("oi_15m_up" if oi_15m > 0 else "oi_15m_down")
+        add_score(15, "oi_15m_up" if oi_15m > 0 else "oi_15m_down", "open_interest", f"{oi_15m:+.2f}%")
 
     if funding is not None and abs(funding) >= thresholds["funding_abs_rate"]:
-        score += 10
-        signals.append("high_positive_funding" if funding > 0 else "high_negative_funding")
+        add_score(
+            10,
+            "high_positive_funding" if funding > 0 else "high_negative_funding",
+            "funding",
+            f"{funding:+.6f}",
+        )
+
+    if all(value is not None for value in (metrics.get("last"), ema12, ema26, macd_hist)):
+        last = float(metrics["last"])
+        ema12_f = float(ema12)
+        ema26_f = float(ema26)
+        macd_hist_f = float(macd_hist)
+        if last >= ema12_f >= ema26_f and macd_hist_f > 0 and direction != "down":
+            add_score(10, "indicator_bullish_alignment", "indicators", "last>=ema12>=ema26 and macd_hist>0")
+            bullish_layers.add("indicators")
+        elif last <= ema12_f <= ema26_f and macd_hist_f < 0 and direction != "up":
+            add_score(10, "indicator_bearish_alignment", "indicators", "last<=ema12<=ema26 and macd_hist<0")
+            bearish_layers.add("indicators")
+    if rsi14 is not None:
+        if rsi14 >= thresholds.get("rsi_overbought", 75):
+            add_score(5, "rsi_overbought", "indicators", f"RSI14={rsi14:.2f}")
+        elif rsi14 <= thresholds.get("rsi_oversold", 25):
+            add_score(5, "rsi_oversold", "indicators", f"RSI14={rsi14:.2f}")
+
+    if news_score is not None and metrics.get("news_sentiment_scope") == "asset":
+        news_threshold = thresholds.get("news_sentiment_abs_score", 1)
+        if news_score >= news_threshold and direction != "down":
+            add_score(5, "news_sentiment_positive", "news_sentiment", f"score={news_score:+.0f}")
+            bullish_layers.add("news_sentiment")
+        elif news_score <= -news_threshold and direction != "up":
+            add_score(5, "news_sentiment_negative", "news_sentiment", f"score={news_score:+.0f}")
+            bearish_layers.add("news_sentiment")
 
     if price_5m is not None and oi_5m is not None:
         price_trigger = abs(price_5m) >= thresholds["price_change_5m_pct"]
         oi_trigger = abs(oi_5m) >= thresholds["oi_delta_5m_pct"]
         if price_trigger and oi_trigger:
             if price_5m > 0 and oi_5m > 0:
-                score += 15
-                signals.append("long_building")
+                add_score(15, "long_building", "confluence", "price up + OI up")
+                bullish_layers.add("open_interest")
             elif price_5m < 0 and oi_5m > 0:
-                score += 15
-                signals.append("short_building")
+                add_score(15, "short_building", "confluence", "price down + OI up")
+                bearish_layers.add("open_interest")
             elif price_5m > 0 and oi_5m < 0:
-                score += 10
-                signals.append("short_covering")
+                add_score(10, "short_covering", "confluence", "price up + OI down")
+                bullish_layers.add("open_interest")
             elif price_5m < 0 and oi_5m < 0:
-                score += 10
-                signals.append("long_liquidation_or_deleveraging")
+                add_score(10, "long_liquidation_or_deleveraging", "confluence", "price down + OI down")
+                bearish_layers.add("open_interest")
+
+    confluence_min = int(thresholds.get("multi_layer_confluence_min_layers", 3))
+    if len(bullish_layers) >= confluence_min and direction != "down":
+        add_score(10, "multi_layer_bullish_confluence", "confluence", ",".join(sorted(bullish_layers)))
+        direction = "up"
+    elif len(bearish_layers) >= confluence_min and direction != "up":
+        add_score(10, "multi_layer_bearish_confluence", "confluence", ",".join(sorted(bearish_layers)))
+        direction = "down"
 
     score = min(score, 100)
+    metrics["score_components"] = score_components
+    metrics["directional_layers"] = {
+        "bullish": sorted(bullish_layers),
+        "bearish": sorted(bearish_layers),
+    }
     severity = None
     if score >= thresholds["strong_score"]:
         severity = "strong"
@@ -876,7 +1153,7 @@ def classify_alert(config: dict[str, Any], row: dict[str, Any], metrics: dict[st
     bucket = int((row["ts"] or utc_now_ms()) // 300_000)
     key = f"{row['inst_id']}:{bucket}:{severity}:{','.join(sorted(set(signals)))}"
     alert_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
-    return {
+    alert = {
         "alert_id": alert_id,
         "ts": int(row["ts"] or utc_now_ms()),
         "iso_ts": iso_from_ms(int(row["ts"] or utc_now_ms())),
@@ -888,6 +1165,8 @@ def classify_alert(config: dict[str, Any], row: dict[str, Any], metrics: dict[st
         "signals": sorted(set(signals)),
         "metrics": metrics,
     }
+    alert["metrics"]["strategy_plan"] = build_strategy_plan(config, alert)
+    return alert
 
 
 def insert_alerts(conn: sqlite3.Connection, alerts: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -923,7 +1202,12 @@ def insert_alerts(conn: sqlite3.Connection, alerts: list[dict[str, Any]], config
     return inserted
 
 
-def recent_alerts(conn: sqlite3.Connection, minutes: int, severity: str | None = None) -> list[dict[str, Any]]:
+def recent_alerts(
+    conn: sqlite3.Connection,
+    minutes: int,
+    severity: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     cutoff = utc_now_ms() - minutes * 60_000
     params: list[Any] = [cutoff]
     where = "ts >= ?"
@@ -936,20 +1220,21 @@ def recent_alerts(conn: sqlite3.Connection, minutes: int, severity: str | None =
     ).fetchall()
     output: list[dict[str, Any]] = []
     for row in rows:
-        output.append(
-            {
-                "alert_id": row["alert_id"],
-                "ts": row["ts"],
-                "iso_ts": iso_from_ms(row["ts"]),
-                "inst_id": row["inst_id"],
-                "inst_type": row["inst_type"],
-                "severity": row["severity"],
-                "score": row["score"],
-                "direction": row["direction"],
-                "signals": json.loads(row["signals_json"]),
-                "metrics": json.loads(row["metrics_json"]),
-            }
-        )
+        alert = {
+            "alert_id": row["alert_id"],
+            "ts": row["ts"],
+            "iso_ts": iso_from_ms(row["ts"]),
+            "inst_id": row["inst_id"],
+            "inst_type": row["inst_type"],
+            "severity": row["severity"],
+            "score": row["score"],
+            "direction": row["direction"],
+            "signals": json.loads(row["signals_json"]),
+            "metrics": json.loads(row["metrics_json"]),
+        }
+        if config is not None and "strategy_plan" not in alert["metrics"]:
+            alert["metrics"]["strategy_plan"] = build_strategy_plan(config, alert)
+        output.append(alert)
     return output
 
 
@@ -960,8 +1245,8 @@ def write_outputs(
     run_stats: dict[str, Any],
 ) -> None:
     alert_window = int(config["thresholds"]["alert_window_minutes"])
-    strong_recent = recent_alerts(conn, alert_window, "strong")
-    medium_recent = recent_alerts(conn, alert_window, "medium")
+    strong_recent = recent_alerts(conn, alert_window, "strong", config)
+    medium_recent = recent_alerts(conn, alert_window, "medium", config)
     new_strong_ids = [alert["alert_id"] for alert in inserted if alert["severity"] == "strong"]
     alerts_payload = {
         "generated_at": iso_from_ms(utc_now_ms()),
@@ -1172,7 +1457,7 @@ def run_once(config: dict[str, Any]) -> dict[str, Any]:
                 continue
             if row["inst_type"] == "SWAP" and (vol is None or vol < config["markets"]["min_swap_volume_usd_24h"]):
                 continue
-            metrics = compute_metrics(conn, row, oi_by_inst, started)
+            metrics = compute_metrics(conn, config, row, oi_by_inst, started)
             alert = classify_alert(config, row, metrics)
             if alert:
                 candidates.append(alert)

@@ -16,6 +16,7 @@ Services:
 
 - `okx-anomaly-scanner.service`
 - `okx-dashboard.service`
+- `okx-hyperliquid-testnet.service` for the bounded three-day Hyperliquid testnet loop.
 
 Dashboard API:
 
@@ -38,3 +39,7 @@ https://hype-hazel.vercel.app
 ```
 
 No trading credentials or Telegram secrets are committed.
+
+## Trading Safety Boundary
+
+The repository now has a Hyperliquid testnet executor for a three-day strong-signal trial. It stores testnet status under `okx_anomaly_scanner/data/`, feeds the dashboard trading panel, and blocks mainnet/live execution in this code path. Wallet secrets stay in an ignored `hyperliquid.testnet.env` file on the active runtime only. A real-wallet phase still needs separate live rules, small validation steps, and explicit controls.

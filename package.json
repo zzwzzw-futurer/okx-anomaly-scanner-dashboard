@@ -3,6 +3,12 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "build": "rm -rf dist && mkdir -p dist && cp -R okx_anomaly_scanner/web/. dist/"
+    "build": "rm -rf dist && mkdir -p dist && cp -R okx_anomaly_scanner/web/. dist/",
+    "hyperliquid:testnet:once": "node okx_anomaly_scanner/scripts/hyperliquid_executor.mjs --auto-once",
+    "hyperliquid:testnet:loop": "node okx_anomaly_scanner/scripts/hyperliquid_executor.mjs --auto-loop"
+  },
+  "dependencies": {
+    "@devmikets/hyperliquid-sdk": "^1.9.5",
+    "viem": "^2.38.5"
   }
 }

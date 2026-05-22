@@ -26,6 +26,7 @@
   },
   "news_sentiment": {
     "enabled": true,
+    "score_lookback_hours": 12,
     "sources": [
       {
         "name": "CoinDesk",
@@ -49,7 +50,31 @@
     "oi_delta_5m_pct": 3.0,
     "oi_delta_15m_pct": 6.0,
     "funding_abs_rate": 0.0005,
+    "rsi_overbought": 75,
+    "rsi_oversold": 25,
+    "news_sentiment_abs_score": 1,
+    "multi_layer_confluence_min_layers": 3,
     "alert_window_minutes": 90
+  },
+  "strategy": {
+    "risk_per_trade_pct": 0.25,
+    "max_risk_per_trade_pct": 0.5,
+    "max_leverage": 2,
+    "min_confluence_layers": 3,
+    "max_signal_age_minutes": 10
+  },
+  "execution": {
+    "enabled": true,
+    "venue": "hyperliquid",
+    "network": "testnet",
+    "mode": "testnet_auto",
+    "testnet_env_file": "hyperliquid.testnet.env",
+    "testnet_account_usd": 500,
+    "testnet_order_notional_usd": 500,
+    "testnet_session_days": 3,
+    "testnet_loop_interval_seconds": 300,
+    "signal_severity": "strong",
+    "max_slippage_bps": 30
   },
   "paths": {
     "database": "data/scanner.sqlite3",

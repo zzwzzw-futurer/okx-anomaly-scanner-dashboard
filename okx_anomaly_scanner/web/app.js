@@ -123,6 +123,7 @@ async function loadDashboard() {
 function renderAll() {
   renderSummary();
   renderStrategyIdeas();
+  renderTestnetTrading();
   renderHistory();
   renderModules();
   renderSystem();
@@ -224,15 +225,19 @@ function oiLayer(item) {
 
 function indicatorLayer(item) {
   const row = latestIndicatorFor(item.inst_id);
-  if (!row) return "暂无匹配的 15分钟 RSI/MACD/EMA 快照";
-  const rsi = Number(row.rsi14);
-  const macdHist = Number(row.macd_hist);
-  const ema12 = Number(row.ema12);
-  const ema26 = Number(row.ema26);
+  const rsiValue = metric(item, "rsi14") ?? row?.rsi14;
+  const macdHistValue = metric(item, "macd_hist") ?? row?.macd_hist;
+  const ema12Value = metric(item, "ema12") ?? row?.ema12;
+  const ema26Value = metric(item, "ema26") ?? row?.ema26;
+  if (!row && rsiValue === undefined && macdHistValue === undefined) return "暂无匹配的 15分钟 RSI/MACD/EMA 快照";
+  const rsi = Number(rsiValue);
+  const macdHist = Number(macdHistValue);
+  const ema12 = Number(ema12Value);
+  const ema26 = Number(ema26Value);
   const heat = Number.isFinite(rsi) && rsi >= 70 ? "偏热" : Number.isFinite(rsi) && rsi <= 30 ? "偏冷" : "中性";
   const ema = Number.isFinite(ema12) && Number.isFinite(ema26) ? (ema12 >= ema26 ? "EMA12>EMA26" : "EMA12<EMA26") : "EMA不足";
   const macd = Number.isFinite(macdHist) ? (macdHist >= 0 ? "MACD柱为正" : "MACD柱为负") : "MACD不足";
-  return `RSI14 ${fmtNum(row.rsi14, 2)} ${heat}，${macd} ${fmtNum(row.macd_hist, 6)}，${ema}`;
+  return `RSI14 ${fmtNum(rsiValue, 2)} ${heat}，${macd} ${fmtNum(macdHistValue, 6)}，${ema}`;
 }
 
 function fundingLayer(item) {
@@ -244,6 +249,15 @@ function fundingLayer(item) {
 }
 
 function newsLayer(item) {
+  const metricHeadlines = metric(item, "news_headlines") || [];
+  if (metricHeadlines.length) {
+    const scope = metric(item, "news_sentiment_scope") === "asset" ? baseAsset(item.inst_id) : "市场";
+    const label = sentimentText(metric(item, "news_sentiment_label"));
+    return `${scope} ${label} 分数 ${fmtNum(metric(item, "news_sentiment_score"), 0)}：${metricHeadlines
+      .slice(0, 2)
+      .map((row) => row.title)
+      .join("；")}`;
+  }
   const rows = state.data?.news_sentiment || [];
   if (!rows.length) return "暂无新闻/情绪快照";
   const base = baseAsset(item.inst_id);
@@ -318,6 +332,9 @@ function rangeText(low, high) {
 }
 
 function makeStrategyIdea(item) {
+  const backendPlan = metric(item, "strategy_plan");
+  if (backendPlan) return normalizeBackendStrategy(item, backendPlan);
+
   const last = Number(metric(item, "last"));
   const direction = item.direction || "neutral";
   const price5 = Number(metric(item, "price_change_5m_pct") || 0);
@@ -376,6 +393,24 @@ function makeStrategyIdea(item) {
   };
 }
 
+function normalizeBackendStrategy(item, plan) {
+  const biasDirection = plan.bias === "short" ? "down" : plan.bias === "long" ? "up" : "neutral";
+  const steps = Array.isArray(plan.entry_scenarios) ? plan.entry_scenarios : [];
+  const exits = Array.isArray(plan.take_profit) ? plan.take_profit : [plan.take_profit].filter(Boolean);
+  const mode = plan.execution_mode || "dry_run";
+  return {
+    inst: item.inst_id,
+    direction: biasDirection,
+    title: plan.bias === "short" ? "规则引擎空头计划" : plan.bias === "long" ? "规则引擎多头计划" : "规则引擎观察计划",
+    setup: plan.summary || `评分 ${item.score}，信号 ${((item.signals || []).slice(0, 4)).join(", ")}`,
+    layers: buildFiveLayerAnalysis(item),
+    entry: steps.length ? steps.join("；") : "等待下一次 5分钟扫描确认。",
+    invalidation: plan.invalidation || "方向投票不足则失效。",
+    exits: exits.length ? exits.join(" / ") : "无交易计划。",
+    risk: `${plan.sizing || plan.risk || "按账户风险上限反推仓位。"} 执行模式：${mode}`,
+  };
+}
+
 function renderStrategyIdeas() {
   const ideas = buildStrategyIdeas();
   const box = $("strategyIdeas");
@@ -417,6 +452,113 @@ function renderStrategyIdeas() {
       `,
     )
     .join("");
+}
+
+function tradeEventText(event) {
+  return {
+    session_started: "会话启动",
+    session_complete: "会话结束",
+    entry_submitted: "入场已提交",
+    entry_rejected: "入场被拒",
+    exit_submitted: "退出已提交",
+    exit_rejected: "退出被拒",
+    signal_rejected: "信号跳过",
+    signal_waiting_for_testnet_signer: "等待签名器",
+    trade_closed_external: "外部平仓",
+    cycle_no_new_strong_signal: "本轮无新强信号",
+    cycle_error: "执行器错误",
+    account_sync_error: "账户回读错误",
+    account_resync_error: "账户复核错误",
+  }[event] || event || "--";
+}
+
+function renderTestnetTrading() {
+  const payload = state.data?.hyperliquid_testnet || {};
+  const snapshot = payload.state || {};
+  const account = snapshot.account || {};
+  const session = snapshot.session || {};
+  const events = payload.events || [];
+  const trades = snapshot.trades || [];
+  const positions = account.positions || [];
+  const fills = snapshot.fills || [];
+  const sessionEnds = session.ends_at || session.ends_at_ms;
+  const status = snapshot.status || "未启动";
+  const credentials = snapshot.credentials || "未检查";
+
+  $("testnetSessionPill").textContent = sessionEnds
+    ? `${status} · 至 ${fmtTime(sessionEnds)}`
+    : "等待3天testnet会话";
+  $("testnetTradeSummary").innerHTML = [
+    ["会话", session.id ? `强信号 ${session.days || 3} 天` : "未启动", session.starts_at ? `起始 ${fmtTime(session.starts_at)}` : "运行 --auto-once 后生成"],
+    ["账户", snapshot.account_address || "--", `凭据 ${credentials}`],
+    ["权益", account.account_value === undefined ? "--" : `${fmtNum(account.account_value)} USDC`, `可提 ${fmtNum(account.withdrawable)}`],
+    ["持仓", positions.length, `名义 ${fmtNum(account.total_position_notional)}`],
+    ["交易记录", trades.length, `${trades.filter((row) => row.status === "open").length} 个执行器持仓`],
+    ["最近循环", snapshot.last_cycle?.iso_ts ? fmtTime(snapshot.last_cycle.iso_ts) : "--", snapshot.last_cycle?.only_severity || "只接强信号"],
+  ]
+    .map(
+      ([label, value, sub]) => `
+        <div class="trade-stat">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value)}</strong>
+          <em>${escapeHtml(sub)}</em>
+        </div>
+      `,
+    )
+    .join("");
+
+  $("testnetPositions").innerHTML = positions.length
+    ? positions
+        .map(
+          (position) => `
+            <article class="trade-row ${position.side === "long" ? "up" : "down"}">
+              <div>
+                <strong>${escapeHtml(position.coin)} ${position.side === "long" ? "LONG" : "SHORT"}</strong>
+                <span>数量 ${fmtNum(position.size, 6)} · 开仓 ${fmtNum(position.entry_px, 6)} · 杠杆 ${fmtNum(position.leverage, 1)}x</span>
+              </div>
+              <div class="trade-kpis">
+                <span>名义 <b>${fmtNum(position.position_value)}</b></span>
+                <span>未实现 <b class="${position.unrealized_pnl >= 0 ? "up-text" : "down-text"}">${fmtNum(position.unrealized_pnl)}</b></span>
+                <span>强平 <b>${fmtNum(position.liquidation_px, 6)}</b></span>
+              </div>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="empty compact-empty">当前testnet账户没有回读到持仓。</div>`;
+
+  $("testnetFills").innerHTML = fills.length
+    ? fills
+        .slice(0, 8)
+        .map(
+          (fill) => `
+            <article class="fill-row">
+              <strong>${escapeHtml(fill.coin)} ${escapeHtml(fill.side || "")}</strong>
+              <span>${fmtNum(fill.size, 6)} @ ${fmtNum(fill.price, 6)}</span>
+              <span>${fmtTime(fill.iso_ts || fill.time)} · PnL ${fmtNum(fill.closed_pnl)}</span>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="empty compact-empty">暂无testnet成交回读。</div>`;
+
+  $("testnetEvents").innerHTML = events.length
+    ? events
+        .slice(0, 18)
+        .map((event) => {
+          const reason = event.reason || event.message || event.statuses?.[0]?.error || "";
+          return `
+            <article class="event-row ${String(event.event || "").includes("rejected") || String(event.event || "").includes("error") ? "warn" : ""}">
+              <div>
+                <strong>${escapeHtml(tradeEventText(event.event))}</strong>
+                <span>${fmtTime(event.iso_ts || event.ts)} · ${escapeHtml(event.coin || event.inst_id || event.session_id || "heartbeat")}</span>
+              </div>
+              <p>${escapeHtml(reason || (event.side ? `${event.side} ${event.size || "--"} @ ${event.order_price || event.price || "--"}` : "强信号执行状态已落盘"))}</p>
+            </article>
+          `;
+        })
+        .join("")
+    : `<div class="empty compact-empty">执行器还没有写入强信号交易轨迹。</div>`;
 }
 
 function fmtAge(minutes) {
@@ -807,7 +949,7 @@ function renderSystem() {
     ["TG扫描推送", `${status.telegram_scan?.status || "--"} · ${status.telegram_scan?.iso_ts ? fmtTime(status.telegram_scan.iso_ts) : "--"}`],
     ["TG策略推送", `${status.telegram_codex?.status || "--"} · ${status.telegram_codex?.iso_ts ? fmtTime(status.telegram_codex.iso_ts) : "--"}`],
     ["Codex已处理", `${status.codex_seen?.seen_count || 0} 个强信号`],
-    ["交易执行", data.trading_executed ? "true" : "false"],
+    ["Testnet交易", data.trading_executed ? "已有订单提交" : "尚无订单提交"],
   ];
   $("systemStatus").innerHTML = items.map(([label, value]) => `<div class="system-item"><span>${label}</span><strong>${value}</strong></div>`).join("");
   $("runsBody").innerHTML = (data.runs || [])

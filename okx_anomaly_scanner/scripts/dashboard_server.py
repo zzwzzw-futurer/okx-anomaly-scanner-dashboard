@@ -455,18 +455,27 @@ def build_dashboard_payload() -> dict[str, Any]:
     telegram_status = load_json(BASE_DIR / "data" / "telegram_status.json", {})
     telegram_codex_status = load_json(BASE_DIR / "data" / "telegram_codex_status.json", {})
     codex_state = load_json(path_from_config(config, "codex_seen_alerts"), {})
+    hyperliquid_testnet_state = load_json(BASE_DIR / "data" / "hyperliquid_testnet_state.json", {})
+    hyperliquid_testnet_events = load_jsonl(BASE_DIR / "data" / "hyperliquid_testnet_events.jsonl", limit=120)
+    entry_events = [
+        item
+        for item in hyperliquid_testnet_events
+        if item.get("event") in ("entry_submitted", "exit_submitted")
+    ]
 
     return {
         "generated_at_ms": now_ms(),
         "generated_at": iso_from_ms(now_ms()),
         "base_dir": str(BASE_DIR),
-        "trading_executed": False,
+        "trading_executed": bool(entry_events),
         "config": {
             "scan_interval_seconds": config.get("scan_interval_seconds"),
             "retention_days": config.get("retention_days"),
             "markets": config.get("markets", {}),
             "module_frequencies_minutes": config.get("module_frequencies_minutes", {}),
             "thresholds": config.get("thresholds", {}),
+            "strategy": config.get("strategy", {}),
+            "execution": config.get("execution", {}),
             "telegram": {
                 "enabled": bool((config.get("telegram") or {}).get("enabled")),
                 "send_scan_result": bool((config.get("telegram") or {}).get("send_scan_result")),
@@ -484,6 +493,10 @@ def build_dashboard_payload() -> dict[str, Any]:
         "funding_overview": funding_overview,
         "news_sentiment": news_sentiment,
         "module_status": module_statuses,
+        "hyperliquid_testnet": {
+            "state": hyperliquid_testnet_state,
+            "events": hyperliquid_testnet_events[:80],
+        },
         "series": series,
         "runs": runs,
         "latest_run": latest_run,
