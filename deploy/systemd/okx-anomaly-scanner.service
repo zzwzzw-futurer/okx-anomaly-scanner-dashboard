@@ -1,0 +1,15 @@
+[Unit]
+Description=OKX anomaly scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/okx_anomaly_scanner
+ExecStart=/usr/bin/python3 /opt/okx_anomaly_scanner/scripts/scanner.py --config /opt/okx_anomaly_scanner/config.vps.json --loop
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

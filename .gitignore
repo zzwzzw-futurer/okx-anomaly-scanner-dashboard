@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.pyc
+.vercel/
+node_modules/
+dist/
+
+okx_anomaly_scanner/data/
+okx_anomaly_scanner/reports/
+okx_anomaly_scanner/telegram.env
+okx_anomaly_scanner/*.sqlite3
+okx_anomaly_scanner/*.sqlite3-*
+.vercel

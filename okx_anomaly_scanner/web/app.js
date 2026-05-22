@@ -1,0 +1,847 @@
+const state = {
+  data: null,
+  filters: { search: "", severity: "all", direction: "all" },
+};
+
+const DASHBOARD_REFRESH_MS = 5 * 60_000;
+const $ = (id) => document.getElementById(id);
+
+function fmtTime(value, mode = "full") {
+  if (!value) return "--";
+  const date = typeof value === "number" ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  const opts =
+    mode === "short"
+      ? { hour: "2-digit", minute: "2-digit" }
+      : { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" };
+  return new Intl.DateTimeFormat("zh-CN", opts).format(date);
+}
+
+function fmtNum(value, digits = 2) {
+  if (value === null || value === undefined || value === "") return "--";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "--";
+  if (Math.abs(n) >= 1e9) return `${(n / 1e9).toFixed(digits)}B`;
+  if (Math.abs(n) >= 1e6) return `${(n / 1e6).toFixed(digits)}M`;
+  if (Math.abs(n) >= 1e3) return `${(n / 1e3).toFixed(digits)}K`;
+  if (Math.abs(n) > 0 && Math.abs(n) < 0.01) return n.toPrecision(3);
+  return n.toLocaleString("en-US", { maximumFractionDigits: digits });
+}
+
+function fmtPct(value, digits = 2) {
+  if (value === null || value === undefined || value === "") return "--";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "--";
+  return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}%`;
+}
+
+function fmtFunding(value) {
+  if (value === null || value === undefined || value === "") return "--";
+  return fmtPct(Number(value) * 100, 4);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => (
+    {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#39;",
+    }[char]
+  ));
+}
+
+function safeUrl(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "#";
+  } catch {
+    return "#";
+  }
+}
+
+function clsDirection(direction) {
+  if (direction === "up") return "up-text";
+  if (direction === "down") return "down-text";
+  return "neutral-text";
+}
+
+function dirText(direction) {
+  return { up: "向上", down: "向下", neutral: "中性" }[direction] || "中性";
+}
+
+function metric(item, key) {
+  return (item?.metrics || {})[key];
+}
+
+function baseAsset(instId) {
+  return String(instId || "").split("-")[0].toUpperCase();
+}
+
+function sameInst(row, instId) {
+  return String(row?.inst_id || "").toUpperCase() === String(instId || "").toUpperCase();
+}
+
+function latestAlertGroups() {
+  const latest = state.data?.latest_alerts || {};
+  return {
+    strong: latest.strong_alerts || [],
+    medium: latest.medium_alerts || [],
+  };
+}
+
+function currentAlerts() {
+  const groups = latestAlertGroups();
+  const rows = state.tab === "strong" ? groups.strong : [...groups.strong, ...groups.medium];
+  return rows
+    .slice()
+    .sort((a, b) => {
+      if (state.tab === "all") {
+        return Number(b.ts || 0) - Number(a.ts || 0) || Number(b.score || 0) - Number(a.score || 0);
+      }
+      return Number(b.score || 0) - Number(a.score || 0) || Number(b.ts || 0) - Number(a.ts || 0);
+    });
+}
+
+async function loadDashboard() {
+  $("refreshState").textContent = "刷新中";
+  try {
+    const response = await fetch(`/api/dashboard?t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    state.data = await response.json();
+    $("refreshState").textContent = "在线";
+    $("lastUpdated").textContent = `刷新 ${fmtTime(Date.now())} · 每5分钟更新`;
+    $("strategyRefreshNote").textContent = `每5分钟更新 · 数据 ${fmtTime(state.data.generated_at || state.data.generated_at_ms)} · 只读分析，不执行交易`;
+    renderAll();
+  } catch (error) {
+    $("refreshState").textContent = "离线";
+    $("lastUpdated").textContent = error.message;
+  }
+}
+
+function renderAll() {
+  renderSummary();
+  renderStrategyIdeas();
+  renderHistory();
+  renderModules();
+  renderSystem();
+}
+
+function renderSummary() {
+  const data = state.data;
+  const latest = data.latest_alerts || {};
+  const summary = data.event_summary || {};
+  const run = data.latest_run || {};
+  const status = data.status || {};
+  const items = [
+    ["当前强信号", (latest.strong_alerts || []).length, `${summary.last_60m_strong || 0} 个 / 最近60分钟`],
+    ["当前中等信号", (latest.medium_alerts || []).length, `${summary.last_60m_medium || 0} 个 / 最近60分钟`],
+    ["最近事件", summary.last_60m_count || 0, "最近60分钟"],
+    ["扫描状态", run.status || "--", run.iso_ts ? fmtTime(run.iso_ts) : "--"],
+    ["Telegram", status.telegram_scan?.status || "--", status.telegram_scan?.iso_ts ? fmtTime(status.telegram_scan.iso_ts) : "--"],
+    ["数据库", fmtNum(data.db_stats?.snapshots || 0, 0), `${fmtNum(data.db_stats?.alerts || 0, 0)} alerts`],
+  ];
+  $("summaryGrid").innerHTML = items
+    .map(
+      ([label, value, sub]) => `
+        <div class="metric">
+          <div class="label">${label}</div>
+          <div class="value">${value}</div>
+          <div class="sub">${sub}</div>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function renderPriorityAlerts() {
+  const alerts = currentAlerts().slice(0, 12);
+  const box = $("priorityAlerts");
+  if (!alerts.length) {
+    box.innerHTML = `<div class="empty">当前没有符合筛选的信号</div>`;
+    return;
+  }
+  box.innerHTML = alerts
+    .map((item) => {
+      const direction = item.direction || "neutral";
+      const signals = (item.signals || []).slice(0, 5);
+      return `
+        <article class="alert-card ${item.severity || ""} ${direction}">
+          <div class="alert-top">
+            <div>
+              <div class="inst">${item.inst_id}</div>
+              <div class="${clsDirection(direction)}">${dirText(direction)} · ${fmtTime(item.iso_ts || item.ts)}</div>
+            </div>
+            <div class="score">${item.score}</div>
+          </div>
+          <div class="meta-row">
+            <div class="kv"><span>最新价</span><strong>${fmtNum(metric(item, "last"), 6)}</strong></div>
+            <div class="kv"><span>5m价格</span><strong class="${clsDirection(Number(metric(item, "price_change_5m_pct")) >= 0 ? "up" : "down")}">${fmtPct(metric(item, "price_change_5m_pct"))}</strong></div>
+            <div class="kv"><span>15m价格</span><strong>${fmtPct(metric(item, "price_change_15m_pct"))}</strong></div>
+            <div class="kv"><span>OI 5m</span><strong>${fmtPct(metric(item, "oi_delta_5m_pct"))}</strong></div>
+            <div class="kv"><span>量比</span><strong>${fmtNum(metric(item, "volume_ratio"))}x</strong></div>
+            <div class="kv"><span>Funding</span><strong>${fmtFunding(metric(item, "funding_rate"))}</strong></div>
+          </div>
+          <div class="chips">${signals.map((signal) => `<span class="chip">${signal}</span>`).join("")}</div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function latestMarketsForAsset(instId) {
+  const base = baseAsset(instId);
+  const rows = (state.data?.latest_market || []).filter((row) => baseAsset(row.inst_id) === base);
+  return {
+    spot: rows.find((row) => row.inst_type === "SPOT" || !String(row.inst_id || "").includes("SWAP")),
+    swap: rows.find((row) => row.inst_type === "SWAP" || String(row.inst_id || "").includes("SWAP")),
+  };
+}
+
+function latestIndicatorFor(instId) {
+  return (state.data?.indicators || []).find((row) => sameInst(row, instId));
+}
+
+function latestFundingFor(instId) {
+  return (state.data?.funding_overview || []).find((row) => sameInst(row, instId));
+}
+
+function tickerLayer(item) {
+  const markets = latestMarketsForAsset(item.inst_id);
+  const spot = markets.spot
+    ? `现货 ${priceLevel(markets.spot.last)} / 24h ${fmtPct(markets.spot.change_24h_pct)} / 量 ${fmtNum(markets.spot.volume_usd_24h)}`
+    : "现货暂无";
+  const swapLast = metric(item, "last") ?? markets.swap?.last;
+  const swapVolume = metric(item, "volume_usd_24h") ?? markets.swap?.volume_usd_24h;
+  const swap = `永续 ${priceLevel(swapLast)} / 5m ${fmtPct(metric(item, "price_change_5m_pct"))} / 15m ${fmtPct(metric(item, "price_change_15m_pct"))} / 量 ${fmtNum(swapVolume)}`;
+  return `${spot}；${swap}`;
+}
+
+function oiLayer(item) {
+  return `OI ${fmtNum(metric(item, "oi_usd"))}，5m ${fmtPct(metric(item, "oi_delta_5m_pct"))}，15m ${fmtPct(metric(item, "oi_delta_15m_pct"))}`;
+}
+
+function indicatorLayer(item) {
+  const row = latestIndicatorFor(item.inst_id);
+  if (!row) return "暂无匹配的 15分钟 RSI/MACD/EMA 快照";
+  const rsi = Number(row.rsi14);
+  const macdHist = Number(row.macd_hist);
+  const ema12 = Number(row.ema12);
+  const ema26 = Number(row.ema26);
+  const heat = Number.isFinite(rsi) && rsi >= 70 ? "偏热" : Number.isFinite(rsi) && rsi <= 30 ? "偏冷" : "中性";
+  const ema = Number.isFinite(ema12) && Number.isFinite(ema26) ? (ema12 >= ema26 ? "EMA12>EMA26" : "EMA12<EMA26") : "EMA不足";
+  const macd = Number.isFinite(macdHist) ? (macdHist >= 0 ? "MACD柱为正" : "MACD柱为负") : "MACD不足";
+  return `RSI14 ${fmtNum(row.rsi14, 2)} ${heat}，${macd} ${fmtNum(row.macd_hist, 6)}，${ema}`;
+}
+
+function fundingLayer(item) {
+  const row = latestFundingFor(item.inst_id);
+  const current = metric(item, "funding_rate") ?? row?.funding_rate;
+  const next = row?.next_funding_rate;
+  const nextTime = row?.funding_time_iso || row?.funding_time;
+  return `当前 ${fmtFunding(current)}，下期预估 ${fmtFunding(next)}${nextTime ? `，结算 ${fmtTime(nextTime, "short")}` : ""}`;
+}
+
+function newsLayer(item) {
+  const rows = state.data?.news_sentiment || [];
+  if (!rows.length) return "暂无新闻/情绪快照";
+  const base = baseAsset(item.inst_id);
+  const direct = rows
+    .filter((row) => (row.matched_assets || []).map((asset) => String(asset).toUpperCase()).includes(base))
+    .slice(0, 2);
+  if (direct.length) {
+    return direct.map((row) => `${sentimentText(row.sentiment_label)}：${row.title}`).join("；");
+  }
+  const sample = rows.slice(0, 8);
+  const counts = sample.reduce(
+    (acc, row) => {
+      const label = row.sentiment_label || "neutral";
+      acc[label] = (acc[label] || 0) + 1;
+      return acc;
+    },
+    { positive: 0, negative: 0, neutral: 0 },
+  );
+  return `未见 ${base} 直接新闻；近端新闻流 ${counts.positive || 0}偏多/${counts.negative || 0}偏空/${counts.neutral || 0}中性`;
+}
+
+function buildFiveLayerAnalysis(item) {
+  return [
+    { label: "行情", text: tickerLayer(item) },
+    { label: "OI", text: oiLayer(item) },
+    { label: "指标", text: indicatorLayer(item) },
+    { label: "Funding", text: fundingLayer(item) },
+    { label: "情绪", text: newsLayer(item) },
+  ];
+}
+
+function buildStrategyIdeas() {
+  const groups = latestAlertGroups();
+  const candidates = [...groups.strong, ...groups.medium]
+    .filter((item) => item && item.inst_id && Number.isFinite(Number(metric(item, "last"))) && Number(metric(item, "last")) > 0)
+    .sort((a, b) => {
+      const scoreA =
+        Number(a.score || 0) * 10 +
+        Math.min(200, Math.abs(Number(metric(a, "price_change_5m_pct") || 0)) * 12) +
+        Math.min(140, Math.abs(Number(metric(a, "oi_delta_5m_pct") || 0)) * 8) +
+        Math.min(90, Number(metric(a, "volume_ratio") || 0) * 3) +
+        Math.min(80, Math.log10(Math.max(1, Number(metric(a, "volume_usd_24h") || 1))) * 6);
+      const scoreB =
+        Number(b.score || 0) * 10 +
+        Math.min(200, Math.abs(Number(metric(b, "price_change_5m_pct") || 0)) * 12) +
+        Math.min(140, Math.abs(Number(metric(b, "oi_delta_5m_pct") || 0)) * 8) +
+        Math.min(90, Number(metric(b, "volume_ratio") || 0) * 3) +
+        Math.min(80, Math.log10(Math.max(1, Number(metric(b, "volume_usd_24h") || 1))) * 6);
+      return scoreB - scoreA;
+    });
+  const seen = new Set();
+  return candidates
+    .filter((item) => {
+      if (seen.has(item.inst_id)) return false;
+      seen.add(item.inst_id);
+      return true;
+    })
+    .slice(0, 3)
+    .map(makeStrategyIdea);
+}
+
+function priceLevel(value, digits = 6) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "--";
+  const abs = Math.abs(n);
+  const precision = abs >= 100 ? 2 : abs >= 1 ? 4 : digits;
+  return fmtNum(n, precision);
+}
+
+function rangeText(low, high) {
+  return `${priceLevel(low)} - ${priceLevel(high)}`;
+}
+
+function makeStrategyIdea(item) {
+  const last = Number(metric(item, "last"));
+  const direction = item.direction || "neutral";
+  const price5 = Number(metric(item, "price_change_5m_pct") || 0);
+  const oi5 = Number(metric(item, "oi_delta_5m_pct") || 0);
+  const volumeRatio = Number(metric(item, "volume_ratio") || 0);
+  const funding = Number(metric(item, "funding_rate") || 0);
+  const isHot = Math.abs(price5) >= 6 || volumeRatio >= 10 || Math.abs(oi5) >= 10;
+  const stopPct = isHot ? 0.055 : 0.035;
+  const firstTpPct = isHot ? 0.055 : 0.035;
+  const secondTpPct = isHot ? 0.115 : 0.075;
+  const layers = buildFiveLayerAnalysis(item);
+
+  if (direction === "down") {
+    const entry = last * 0.99;
+    const reboundLow = last * 1.015;
+    const reboundHigh = last * 1.035;
+    const invalidation = last * (1 + stopPct);
+    const tp1 = last * (1 - firstTpPct);
+    const tp2 = last * (1 - secondTpPct);
+    const caution = funding < -0.003 ? "资金费率偏负，追空容易遇到反抽挤压。" : "下跌伴随 OI 回落，更像去杠杆，避免急跌末端追空。";
+    return {
+      inst: item.inst_id,
+      direction,
+      title: "反抽失败空 / 去杠杆观察",
+      setup: `评分 ${item.score}，5m价格 ${fmtPct(price5)}，OI 5m ${fmtPct(oi5)}，量比 ${fmtNum(volumeRatio)}x。`,
+      layers,
+      entry: `跌破 ${priceLevel(entry)} 后反抽不过 ${rangeText(reboundLow, reboundHigh)} 再观察。`,
+      invalidation: `收回 ${priceLevel(invalidation)} 上方则空头思路失效。`,
+      exits: `止盈参考 ${priceLevel(tp1)} / ${priceLevel(tp2)}。`,
+      risk: `${caution} demo 单笔风险 0.25%-0.5%。`,
+    };
+  }
+
+  const breakout = last * (1 + (isHot ? 0.018 : 0.01));
+  const pullbackLow = last * (1 - (isHot ? 0.055 : 0.035));
+  const pullbackHigh = last * (1 - (isHot ? 0.025 : 0.018));
+  const invalidation = last * (1 - stopPct);
+  const tp1 = last * (1 + firstTpPct);
+  const tp2 = last * (1 + secondTpPct);
+  const caution =
+    funding > 0.003
+      ? "资金费率偏高，避免在拥挤多头里追涨。"
+      : oi5 > 0
+        ? "价格与 OI 同步扩张，偏多结构成立，但仍需等待确认。"
+        : "上涨但 OI 未同步增强，优先当短线反弹处理。";
+  return {
+    inst: item.inst_id,
+    direction,
+    title: isHot ? "突破确认多 / 回踩接力" : "轻仓跟随多",
+    setup: `评分 ${item.score}，5m价格 ${fmtPct(price5)}，OI 5m ${fmtPct(oi5)}，量比 ${fmtNum(volumeRatio)}x。`,
+    layers,
+    entry: `站稳 ${priceLevel(breakout)} 可右侧观察；更稳等 ${rangeText(pullbackLow, pullbackHigh)} 回踩企稳。`,
+    invalidation: `跌破 ${priceLevel(invalidation)} 或 OI 快速回落则放弃。`,
+    exits: `止盈参考 ${priceLevel(tp1)} / ${priceLevel(tp2)}。`,
+    risk: `${caution} demo 单笔风险 0.25%-0.5%。`,
+  };
+}
+
+function renderStrategyIdeas() {
+  const ideas = buildStrategyIdeas();
+  const box = $("strategyIdeas");
+  if (!ideas.length) {
+    box.innerHTML = `<div class="empty">当前没有足够强的信号生成策略，继续观察扫描结果。</div>`;
+    return;
+  }
+  box.innerHTML = ideas
+    .map(
+      (idea, index) => `
+        <article class="strategy-card ${idea.direction}">
+          <div class="strategy-top">
+            <span class="strategy-index">${index + 1}</span>
+            <div>
+              <h3>${escapeHtml(idea.inst)}</h3>
+              <p class="${clsDirection(idea.direction)}">${escapeHtml(idea.title)}</p>
+            </div>
+          </div>
+          <div class="strategy-line">${escapeHtml(idea.setup)}</div>
+          <div class="strategy-layers">
+            ${idea.layers
+              .map(
+                (layer) => `
+                  <div>
+                    <span>${escapeHtml(layer.label)}</span>
+                    <strong>${escapeHtml(layer.text)}</strong>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+          <div class="strategy-steps">
+            <div><span>入场</span><strong>${escapeHtml(idea.entry)}</strong></div>
+            <div><span>失效</span><strong>${escapeHtml(idea.invalidation)}</strong></div>
+            <div><span>止盈</span><strong>${escapeHtml(idea.exits)}</strong></div>
+            <div><span>风险</span><strong>${escapeHtml(idea.risk)}</strong></div>
+          </div>
+        </article>
+      `,
+    )
+    .join("");
+}
+
+function fmtAge(minutes) {
+  if (minutes === null || minutes === undefined) return "未执行";
+  const n = Number(minutes);
+  if (!Number.isFinite(n)) return "未执行";
+  if (n < 1) return "刚刚";
+  if (n < 60) return `${Math.round(n)}分钟前`;
+  return `${(n / 60).toFixed(1)}小时前`;
+}
+
+function renderModules() {
+  renderModuleStatus();
+  renderIndicatorModule();
+  renderFundingModule();
+  renderSentimentModule();
+}
+
+function renderModuleStatus() {
+  const modules = state.data.module_status || {};
+  const labels = [
+    ["indicators", "指标"],
+    ["funding", "Funding"],
+    ["news_sentiment", "新闻情绪"],
+  ];
+  $("moduleStatus").innerHTML = labels
+    .map(([key, label]) => {
+      const item = modules[key] || {};
+      const stale = item.stale || !item.last_ms;
+      return `
+        <div class="module-status ${stale ? "stale" : "fresh"}">
+          <span>${label}</span>
+          <strong>${fmtAge(item.age_minutes)}</strong>
+          <em>${item.frequency_minutes || "--"}分钟</em>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderIndicatorModule() {
+  const rows = (state.data.indicators || []).slice(0, 12);
+  const box = $("indicatorModule");
+  if (!rows.length) {
+    box.innerHTML = `<div class="empty compact-empty">暂无 RSI/MACD/EMA 结果；下一次 15 分钟模块执行后会出现。</div>`;
+    return;
+  }
+  box.innerHTML = rows
+    .map((row) => {
+      const rsi = Number(row.rsi14);
+      const macdHist = Number(row.macd_hist);
+      const ema12 = Number(row.ema12);
+      const ema26 = Number(row.ema26);
+      const tone = Number.isFinite(rsi) && rsi >= 70 ? "hot" : Number.isFinite(rsi) && rsi <= 30 ? "cold" : macdHist >= 0 ? "up" : "down";
+      const emaTrend = Number.isFinite(ema12) && Number.isFinite(ema26) ? (ema12 >= ema26 ? "EMA12 > EMA26" : "EMA12 < EMA26") : "--";
+      return `
+        <article class="module-row ${tone}">
+          <div class="module-row-main">
+            <strong>${escapeHtml(row.inst_id)}</strong>
+            <span>${fmtTime(row.iso_ts || row.ts)} · ${escapeHtml(row.bar || "5m")}</span>
+          </div>
+          <div class="module-metrics">
+            <span>收盘 <b>${fmtNum(row.close, 6)}</b></span>
+            <span>RSI14 <b>${fmtNum(row.rsi14, 2)}</b></span>
+            <span>MACD柱 <b>${fmtNum(row.macd_hist, 6)}</b></span>
+            <span>${emaTrend}</span>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderFundingModule() {
+  const rows = (state.data.funding_overview || []).slice(0, 12);
+  const box = $("fundingModule");
+  if (!rows.length) {
+    box.innerHTML = `<div class="empty compact-empty">暂无 funding rate 结果。</div>`;
+    return;
+  }
+  box.innerHTML = rows
+    .map((row) => {
+      const rate = Number(row.funding_rate);
+      const tone = rate >= 0 ? "up" : "down";
+      return `
+        <article class="module-row ${tone}">
+          <div class="module-row-main">
+            <strong>${escapeHtml(row.inst_id)}</strong>
+            <span>${fmtTime(row.iso_ts || row.ts)} · 下次 ${fmtTime(row.funding_time_iso || row.funding_time, "short")}</span>
+          </div>
+          <div class="module-metrics">
+            <span>当前 <b>${fmtFunding(row.funding_rate)}</b></span>
+            <span>下期预估 <b>${fmtFunding(row.next_funding_rate)}</b></span>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function sentimentText(label) {
+  return { positive: "偏多", negative: "偏空", neutral: "中性" }[label] || "中性";
+}
+
+function renderSentimentModule() {
+  const rows = (state.data.news_sentiment || []).slice(0, 12);
+  const box = $("sentimentModule");
+  if (!rows.length) {
+    box.innerHTML = `<div class="empty compact-empty">暂无新闻/情绪结果；公开新闻源可能暂时无新增内容。</div>`;
+    return;
+  }
+  box.innerHTML = rows
+    .map((row) => {
+      const label = row.sentiment_label || "neutral";
+      const assets = (row.matched_assets || []).length ? row.matched_assets.join(", ") : "市场";
+      return `
+        <article class="module-row news ${label}">
+          <div class="module-row-main">
+            <strong><a href="${safeUrl(row.link)}" target="_blank" rel="noreferrer">${escapeHtml(row.title)}</a></strong>
+            <span>${escapeHtml(row.source)} · ${fmtTime(row.published_iso || row.published_ms)}</span>
+          </div>
+          <div class="module-metrics">
+            <span class="sentiment ${label}">${sentimentText(label)}</span>
+            <span>分数 <b>${fmtNum(row.sentiment_score, 0)}</b></span>
+            <span>关联 <b>${escapeHtml(assets)}</b></span>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderRadar() {
+  const summary = state.data.event_summary || {};
+  const direction = summary.direction_counts || {};
+  const directionRows = [
+    ["向上", direction.up || 0, "green"],
+    ["向下", direction.down || 0, "red"],
+    ["中性", direction.neutral || 0, "amber"],
+  ];
+  const maxDirection = Math.max(1, ...directionRows.map((row) => row[1]));
+  const topVolume = (summary.top_volume_ratio || []).slice(0, 5);
+  const topOi = (summary.top_oi_abs_change || []).slice(0, 5);
+  const funding = (summary.extreme_funding || []).slice(0, 5);
+  $("radar").innerHTML = `
+    <div class="radar-block">
+      <h3>方向分布</h3>
+      ${directionRows
+        .map(
+          ([label, count, color]) => `
+            <div class="barline">
+              <span>${label}</span>
+              <div class="bartrack"><div class="barfill" style="width:${(count / maxDirection) * 100}%; background:var(--${color})"></div></div>
+              <strong>${count}</strong>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+    <div class="radar-block">
+      <h3>量比最高</h3>
+      ${miniList(topVolume, (item) => `${fmtNum(metric(item, "volume_ratio"))}x`)}
+    </div>
+    <div class="radar-block">
+      <h3>OI变化最大</h3>
+      ${miniList(topOi, (item) => fmtPct(metric(item, "oi_delta_5m_pct")))}
+    </div>
+    <div class="radar-block">
+      <h3>Funding极值</h3>
+      ${miniList(funding, (item) => fmtFunding(metric(item, "funding_rate")))}
+    </div>
+  `;
+}
+
+function miniList(items, valueFn) {
+  if (!items.length) return `<div class="empty">暂无</div>`;
+  return items
+    .map(
+      (item) => `
+        <div class="barline">
+          <span>${item.inst_id}</span>
+          <div class="bartrack"><div class="barfill" style="width:${Math.min(100, Number(item.score || 60))}%;"></div></div>
+          <strong>${valueFn(item)}</strong>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function renderInstrumentSelect() {
+  const select = $("instrumentSelect");
+  const keys = Object.keys(state.data.series || {});
+  if (!keys.includes(state.selected)) state.selected = keys[0] || "";
+  select.innerHTML = keys.map((key) => `<option value="${key}" ${key === state.selected ? "selected" : ""}>${key}</option>`).join("");
+}
+
+function renderSeriesChart() {
+  const canvas = $("seriesChart");
+  const ctx = canvas.getContext("2d");
+  const rect = canvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  canvas.width = Math.max(320, Math.floor(rect.width * scale));
+  canvas.height = Math.floor(260 * scale);
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  const width = rect.width;
+  const height = 260;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "rgba(255,255,255,0.025)";
+  ctx.fillRect(12, 12, width - 24, height - 32);
+  const series = state.data.series?.[state.selected] || {};
+  const price = (series.price || []).filter((p) => Number.isFinite(Number(p.last)));
+  const oi = (series.oi || []).filter((p) => Number.isFinite(Number(p.oi_usd)));
+  if (price.length < 2) {
+    ctx.fillStyle = "#8ea0b6";
+    ctx.fillText("暂无序列数据", 20, 40);
+    $("seriesLegend").innerHTML = "";
+    return;
+  }
+  const minTs = Math.min(...price.map((p) => p.ts));
+  const maxTs = Math.max(...price.map((p) => p.ts));
+  drawGrid(ctx, width, height);
+  drawLine(ctx, price, "last", minTs, maxTs, "#38d5ff", width, height);
+  if (oi.length > 1) drawLine(ctx, oi, "oi_usd", minTs, maxTs, "#4df0a8", width, height);
+  const first = price[0]?.last;
+  const last = price.at(-1)?.last;
+  $("seriesLegend").innerHTML = `
+    <span>价格 ${fmtNum(first, 6)} → ${fmtNum(last, 6)} (${fmtPct(((last - first) / first) * 100)})</span>
+    <span>OI ${fmtNum(oi.at(-1)?.oi_usd || 0)}</span>
+  `;
+}
+
+function drawGrid(ctx, width, height) {
+  ctx.strokeStyle = "rgba(153,179,204,0.13)";
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 5; i += 1) {
+    const y = 18 + i * ((height - 48) / 4);
+    ctx.beginPath();
+    ctx.moveTo(16, y);
+    ctx.lineTo(width - 16, y);
+    ctx.stroke();
+  }
+}
+
+function drawLine(ctx, rows, key, minTs, maxTs, color, width, height) {
+  const values = rows.map((row) => Number(row[key])).filter(Number.isFinite);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const left = 18;
+  const right = width - 18;
+  const top = 18;
+  const bottom = height - 30;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  rows.forEach((row, index) => {
+    const x = left + ((Number(row.ts) - minTs) / Math.max(1, maxTs - minTs)) * (right - left);
+    const y = bottom - ((Number(row[key]) - min) / span) * (bottom - top);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function renderHourlyBars() {
+  const buckets = state.data.hourly_buckets || [];
+  const max = Math.max(1, ...buckets.map((b) => (b.strong || 0) + (b.medium || 0)));
+  $("hourlyBars").innerHTML = buckets
+    .map((bucket) => {
+      const strongHeight = Math.max(2, ((bucket.strong || 0) / max) * 210);
+      const mediumHeight = Math.max(bucket.medium ? 2 : 0, ((bucket.medium || 0) / max) * 210);
+      return `
+        <div class="hour" title="${fmtTime(bucket.iso_ts)} 强:${bucket.strong} 中:${bucket.medium}">
+          <div class="hour-stack" style="height:${strongHeight + mediumHeight}px">
+            <div class="hour-strong" style="height:${strongHeight}px"></div>
+            <div class="hour-medium" style="height:${mediumHeight}px"></div>
+          </div>
+          <div class="hour-label">${fmtTime(bucket.iso_ts, "short").slice(0, 2)}</div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function filteredHistory() {
+  const rows = state.data.alert_history || [];
+  return rows
+    .filter((item) => {
+      const search = state.filters.search.toLowerCase();
+      const inst = String(item.inst_id || "").toLowerCase();
+      if (search && !inst.includes(search)) return false;
+      if (state.filters.severity !== "all" && item.severity !== state.filters.severity) return false;
+      if (state.filters.direction !== "all" && (item.direction || "neutral") !== state.filters.direction) return false;
+      return true;
+    })
+    .slice(0, 180);
+}
+
+function renderCodexHistoryAnalysis(item) {
+  if (item.severity !== "strong") {
+    return `<span class="analysis-muted">仅强信号生成策略分析</span>`;
+  }
+  if (!Number.isFinite(Number(metric(item, "last"))) || Number(metric(item, "last")) <= 0) {
+    return `<span class="analysis-muted">价格数据不足，暂不生成策略</span>`;
+  }
+  const idea = makeStrategyIdea(item);
+  return `
+    <div class="history-analysis ${idea.direction}">
+      <strong>${escapeHtml(idea.title)}</strong>
+      <span>${escapeHtml(idea.setup)}</span>
+      <div class="history-layers">
+        ${idea.layers
+          .map(
+            (layer) => `
+              <div>
+                <em>${escapeHtml(layer.label)}</em>
+                <span>${escapeHtml(layer.text)}</span>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+      <span>入场：${escapeHtml(idea.entry)}</span>
+      <span>失效：${escapeHtml(idea.invalidation)}</span>
+      <span>止盈：${escapeHtml(idea.exits)}</span>
+      <span>风险：${escapeHtml(idea.risk)}</span>
+    </div>
+  `;
+}
+
+function renderHistory() {
+  const rows = filteredHistory();
+  const body = $("historyBody");
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="13">暂无历史事件</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows
+    .map(
+      (item) => `
+      <tr>
+        <td>${fmtTime(item.iso_ts || item.ts)}</td>
+        <td><strong>${escapeHtml(item.inst_id)}</strong></td>
+        <td><span class="badge ${item.severity}">${item.severity}</span></td>
+        <td class="${clsDirection(item.direction)}">${dirText(item.direction)}</td>
+        <td>${item.score}</td>
+        <td>${fmtNum(metric(item, "last"), 6)}</td>
+        <td class="${clsDirection(Number(metric(item, "price_change_5m_pct")) >= 0 ? "up" : "down")}">${fmtPct(metric(item, "price_change_5m_pct"))}</td>
+        <td>${fmtPct(metric(item, "price_change_15m_pct"))}</td>
+        <td>${fmtPct(metric(item, "oi_delta_5m_pct"))}</td>
+        <td>${fmtNum(metric(item, "volume_ratio"))}x</td>
+        <td>${fmtFunding(metric(item, "funding_rate"))}</td>
+        <td>${renderCodexHistoryAnalysis(item)}</td>
+        <td>${(item.signals || []).slice(0, 3).map(escapeHtml).join(", ")}</td>
+      </tr>
+    `,
+    )
+    .join("");
+}
+
+function renderMarket() {
+  const rows = (state.data.latest_market || []).slice(0, 80);
+  $("marketBody").innerHTML = rows
+    .map(
+      (row) => `
+        <tr>
+          <td><strong>${row.inst_id}</strong></td>
+          <td>${row.inst_type}</td>
+          <td>${fmtNum(row.last, 6)}</td>
+          <td class="${clsDirection(Number(row.change_24h_pct) >= 0 ? "up" : "down")}">${fmtPct(row.change_24h_pct)}</td>
+          <td>${fmtNum(row.volume_usd_24h)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+}
+
+function renderSystem() {
+  const data = state.data;
+  const run = data.latest_run || {};
+  const cfg = data.config || {};
+  const status = data.status || {};
+  const items = [
+    ["最近扫描", run.iso_ts ? fmtTime(run.iso_ts) : "--"],
+    ["扫描间隔", `${cfg.scan_interval_seconds || "--"} 秒`],
+    ["Funding频率", `${cfg.module_frequencies_minutes?.funding || "--"} 分钟`],
+    ["指标频率", `${cfg.module_frequencies_minutes?.indicators || "--"} 分钟`],
+    ["TG扫描推送", `${status.telegram_scan?.status || "--"} · ${status.telegram_scan?.iso_ts ? fmtTime(status.telegram_scan.iso_ts) : "--"}`],
+    ["TG策略推送", `${status.telegram_codex?.status || "--"} · ${status.telegram_codex?.iso_ts ? fmtTime(status.telegram_codex.iso_ts) : "--"}`],
+    ["Codex已处理", `${status.codex_seen?.seen_count || 0} 个强信号`],
+    ["交易执行", data.trading_executed ? "true" : "false"],
+  ];
+  $("systemStatus").innerHTML = items.map(([label, value]) => `<div class="system-item"><span>${label}</span><strong>${value}</strong></div>`).join("");
+  $("runsBody").innerHTML = (data.runs || [])
+    .slice(0, 12)
+    .map(
+      (row) => `
+        <tr>
+          <td>${fmtTime(row.iso_ts || row.ts)}</td>
+          <td>${row.status}</td>
+          <td>${row.spot_count}</td>
+          <td>${row.swap_count}</td>
+          <td>${row.strong_alert_count}</td>
+          <td>${row.duration_ms}ms</td>
+        </tr>
+      `,
+    )
+    .join("");
+}
+
+function wireEvents() {
+  $("searchInput").addEventListener("input", (event) => {
+    state.filters.search = event.target.value.trim();
+    renderHistory();
+  });
+  $("severityFilter").addEventListener("change", (event) => {
+    state.filters.severity = event.target.value;
+    renderHistory();
+  });
+  $("directionFilter").addEventListener("change", (event) => {
+    state.filters.direction = event.target.value;
+    renderHistory();
+  });
+}
+
+wireEvents();
+loadDashboard();
+setInterval(loadDashboard, DASHBOARD_REFRESH_MS);

@@ -1,0 +1,8 @@
+{
+  "name": "okx-anomaly-scanner-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "rm -rf dist && mkdir -p dist && cp -R okx_anomaly_scanner/web/. dist/"
+  }
+}

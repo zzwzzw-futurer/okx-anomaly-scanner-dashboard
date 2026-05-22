@@ -1,0 +1,62 @@
+{
+  "scan_interval_seconds": 300,
+  "retention_days": 14,
+  "markets": {
+    "spot_quote_ccy": "USDT",
+    "swap_settle_ccy": "USDT",
+    "min_spot_volume_usd_24h": 500000,
+    "min_swap_volume_usd_24h": 1000000,
+    "funding_top_swaps": 80,
+    "indicator_top_swaps": 80
+  },
+  "module_frequencies_minutes": {
+    "price_volume": 5,
+    "open_interest": 5,
+    "indicators": 15,
+    "funding": 15,
+    "news_sentiment": 15,
+    "codex_strong_alert_watch": 5
+  },
+  "telegram": {
+    "enabled": false,
+    "env_file": "telegram.env",
+    "send_scan_result": false,
+    "send_codex_strategy": false,
+    "max_alerts_per_message": 5
+  },
+  "news_sentiment": {
+    "enabled": true,
+    "sources": [
+      {
+        "name": "CoinDesk",
+        "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"
+      },
+      {
+        "name": "Cointelegraph",
+        "url": "https://cointelegraph.com/rss"
+      }
+    ],
+    "max_items_per_source": 20
+  },
+  "thresholds": {
+    "medium_score": 60,
+    "strong_score": 85,
+    "price_change_5m_pct": 2.5,
+    "price_change_15m_pct": 5.0,
+    "price_change_1h_pct": 8.0,
+    "volume_ratio": 3.0,
+    "min_volume_delta_usd_5m": 100000,
+    "oi_delta_5m_pct": 3.0,
+    "oi_delta_15m_pct": 6.0,
+    "funding_abs_rate": 0.0005,
+    "alert_window_minutes": 90
+  },
+  "paths": {
+    "database": "data/scanner.sqlite3",
+    "events_jsonl": "data/events.jsonl",
+    "alerts_json": "data/alerts.json",
+    "strong_alert_flag": "data/strong_alert.flag",
+    "codex_seen_alerts": "data/codex_seen_alerts.json",
+    "latest_report": "reports/latest_report.md"
+  }
+}

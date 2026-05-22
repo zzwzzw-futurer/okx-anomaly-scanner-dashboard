@@ -1,0 +1,15 @@
+[Unit]
+Description=OKX anomaly scanner dashboard
+After=network-online.target okx-anomaly-scanner.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/okx_anomaly_scanner
+ExecStart=/usr/bin/python3 /opt/okx_anomaly_scanner/scripts/dashboard_server.py --config /opt/okx_anomaly_scanner/config.vps.json --host 0.0.0.0 --port 8787
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
