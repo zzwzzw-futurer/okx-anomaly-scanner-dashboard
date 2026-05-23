@@ -327,12 +327,81 @@ function simplifyFills(rows) {
   }));
 }
 
+function buildCoinPnlSnapshot(positions = [], fills = []) {
+  const byCoin = new Map();
+  const ensure = (coin) => {
+    const key = String(coin || "").toUpperCase();
+    if (!key) return null;
+    if (!byCoin.has(key)) {
+      byCoin.set(key, {
+        coin: key,
+        realized_pnl: 0,
+        unrealized_pnl: 0,
+        fees: 0,
+        gross_pnl: 0,
+        net_pnl: 0,
+        total_pnl: 0,
+        fills_count: 0,
+        position_value: 0,
+        margin_used: 0,
+        side: "",
+        size: 0,
+        entry_px: 0,
+        last_fill_time: null,
+        last_fill_iso: null,
+      });
+    }
+    return byCoin.get(key);
+  };
+
+  for (const fill of fills || []) {
+    const item = ensure(fill.coin);
+    if (!item) continue;
+    item.realized_pnl += num(fill.closed_pnl);
+    item.fees += Math.abs(num(fill.fee));
+    item.fills_count += 1;
+    const fillTime = num(fill.time);
+    if (fillTime && (!item.last_fill_time || fillTime > item.last_fill_time)) {
+      item.last_fill_time = fillTime;
+      item.last_fill_iso = iso(fillTime);
+    }
+  }
+
+  for (const position of positions || []) {
+    const item = ensure(position.coin);
+    if (!item) continue;
+    item.unrealized_pnl += num(position.unrealized_pnl);
+    item.position_value += Math.abs(num(position.position_value));
+    item.margin_used += num(position.margin_used);
+    item.side = position.side || item.side;
+    item.size = num(position.size);
+    item.entry_px = num(position.entry_px);
+  }
+
+  return Array.from(byCoin.values())
+    .map((item) => {
+      const grossPnl = item.realized_pnl + item.unrealized_pnl;
+      const netPnl = grossPnl - item.fees;
+      return {
+        ...item,
+        realized_pnl: num(item.realized_pnl),
+        unrealized_pnl: num(item.unrealized_pnl),
+        fees: num(item.fees),
+        gross_pnl: grossPnl,
+        net_pnl: netPnl,
+        total_pnl: netPnl,
+      };
+    })
+    .sort((a, b) => Math.abs(num(b.total_pnl)) - Math.abs(num(a.total_pnl)));
+}
+
 function accountSeriesPoint(state) {
   if (!state.account) return null;
   const current = nowMs();
   const accountValue = num(state.account.account_value);
   const startingCapital = num(state.session?.starting_capital_usd);
   const unrealizedPnl = (state.account.positions || []).reduce((sum, position) => sum + num(position.unrealized_pnl), 0);
+  const coinPnl = buildCoinPnlSnapshot(state.account.positions || [], state.fills || []);
   return {
     ts: current,
     iso_ts: iso(current),
@@ -345,6 +414,7 @@ function accountSeriesPoint(state) {
     total_position_notional: num(state.account.total_position_notional),
     total_margin_used: num(state.account.total_margin_used),
     positions_count: (state.account.positions || []).length,
+    coin_pnl: coinPnl,
   };
 }
 

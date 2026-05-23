@@ -499,6 +499,7 @@ function renderTestnetTrading() {
   const totalPnl = Number.isFinite(accountValue) && startingCapital ? accountValue - startingCapital : null;
   const totalPnlPct = totalPnl !== null && startingCapital ? (totalPnl / startingCapital) * 100 : null;
   const unrealizedPnl = positions.reduce((sum, position) => sum + Number(position.unrealized_pnl || 0), 0);
+  const pnlRows = normalizePnlRows(accountSeries, { startingCapital, accountValue, totalPnl, totalPnlPct, unrealizedPnl, positions, fills });
   const pnlClass = totalPnl === null ? "" : totalPnl >= 0 ? "positive" : "negative";
 
   $("testnetSessionPill").textContent = sessionEnds
@@ -529,7 +530,8 @@ function renderTestnetTrading() {
       `,
     )
     .join("");
-  renderTestnetPnl(accountSeries, { startingCapital, accountValue, totalPnl, totalPnlPct, unrealizedPnl });
+  renderTestnetPnl(pnlRows, { startingCapital, accountValue, totalPnl, totalPnlPct, unrealizedPnl });
+  renderSymbolPnl(pnlRows);
 
   $("testnetPositions").innerHTML = positions.length
     ? positions
@@ -585,7 +587,77 @@ function renderTestnetTrading() {
     : `<div class="empty compact-empty">执行器还没有写入强信号交易轨迹。</div>`;
 }
 
-function renderTestnetPnl(accountSeries, metrics) {
+function finiteNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function buildCoinPnlSnapshot(positions = [], fills = []) {
+  const byCoin = new Map();
+  const ensure = (coin) => {
+    const key = String(coin || "").toUpperCase();
+    if (!key) return null;
+    if (!byCoin.has(key)) {
+      byCoin.set(key, {
+        coin: key,
+        realized_pnl: 0,
+        unrealized_pnl: 0,
+        fees: 0,
+        gross_pnl: 0,
+        net_pnl: 0,
+        total_pnl: 0,
+        fills_count: 0,
+        position_value: 0,
+        margin_used: 0,
+        side: "",
+        size: 0,
+        entry_px: 0,
+        last_fill_time: null,
+        last_fill_iso: null,
+      });
+    }
+    return byCoin.get(key);
+  };
+
+  fills.forEach((fill) => {
+    const item = ensure(fill.coin);
+    if (!item) return;
+    item.realized_pnl += finiteNumber(fill.closed_pnl);
+    item.fees += Math.abs(finiteNumber(fill.fee));
+    item.fills_count += 1;
+    const fillTime = finiteNumber(fill.time);
+    if (fillTime && (!item.last_fill_time || fillTime > item.last_fill_time)) {
+      item.last_fill_time = fillTime;
+      item.last_fill_iso = new Date(fillTime).toISOString();
+    }
+  });
+
+  positions.forEach((position) => {
+    const item = ensure(position.coin);
+    if (!item) return;
+    item.unrealized_pnl += finiteNumber(position.unrealized_pnl);
+    item.position_value += Math.abs(finiteNumber(position.position_value));
+    item.margin_used += finiteNumber(position.margin_used);
+    item.side = position.side || item.side;
+    item.size = finiteNumber(position.size);
+    item.entry_px = finiteNumber(position.entry_px);
+  });
+
+  return Array.from(byCoin.values())
+    .map((item) => {
+      const grossPnl = item.realized_pnl + item.unrealized_pnl;
+      const netPnl = grossPnl - item.fees;
+      return {
+        ...item,
+        gross_pnl: grossPnl,
+        net_pnl: netPnl,
+        total_pnl: netPnl,
+      };
+    })
+    .sort((a, b) => Math.abs(finiteNumber(b.total_pnl)) - Math.abs(finiteNumber(a.total_pnl)));
+}
+
+function normalizePnlRows(accountSeries, metrics) {
   const currentPoint =
     Number.isFinite(metrics.accountValue) && metrics.startingCapital
       ? {
@@ -596,15 +668,20 @@ function renderTestnetPnl(accountSeries, metrics) {
           total_pnl: metrics.totalPnl,
           total_pnl_pct: metrics.totalPnlPct,
           unrealized_pnl: metrics.unrealizedPnl,
+          positions: metrics.positions || [],
+          coin_pnl: buildCoinPnlSnapshot(metrics.positions || [], metrics.fills || []),
         }
       : null;
-  const rows = accountSeries
+  return accountSeries
     .concat(currentPoint ? [currentPoint] : [])
     .filter((row) => Number.isFinite(Number(row.ts)) && Number.isFinite(Number(row.account_value)))
     .sort((a, b) => Number(a.ts) - Number(b.ts))
     .filter((row, index, list) => index === list.length - 1 || Number(row.ts) !== Number(list[index + 1].ts));
+}
+
+function renderTestnetPnl(rows, metrics) {
   const visibleRows = filterPnlRows(rows);
-  const latest = rows.at(-1) || currentPoint || {};
+  const latest = rows.at(-1) || {};
   const pnl = Number(latest.total_pnl ?? metrics.totalPnl);
   const pnlPct = Number(latest.total_pnl_pct ?? metrics.totalPnlPct);
   const unrealized = Number(latest.unrealized_pnl ?? metrics.unrealizedPnl);
@@ -626,6 +703,123 @@ function renderTestnetPnl(accountSeries, metrics) {
   `;
   renderPnlPeriodControls(rows);
   drawPnlChart(visibleRows, metrics.startingCapital, rows.length);
+}
+
+function coinPnlRowsFromPoint(row) {
+  if (Array.isArray(row?.coin_pnl) && row.coin_pnl.length) return row.coin_pnl;
+  if (Array.isArray(row?.positions) && row.positions.length) return buildCoinPnlSnapshot(row.positions, row.fills || []);
+  return [];
+}
+
+function buildSymbolPnlHistory(rows) {
+  const byCoin = new Map();
+  filterPnlRows(rows).forEach((row) => {
+    coinPnlRowsFromPoint(row).forEach((item) => {
+      const coin = String(item.coin || "").toUpperCase();
+      if (!coin) return;
+      if (!byCoin.has(coin)) {
+        byCoin.set(coin, {
+          coin,
+          latest: null,
+          series: [],
+        });
+      }
+      const totalPnl = finiteNumber(item.total_pnl ?? item.net_pnl ?? item.gross_pnl);
+      const entry = {
+        ts: Number(row.ts),
+        iso_ts: row.iso_ts,
+        total_pnl: totalPnl,
+        realized_pnl: finiteNumber(item.realized_pnl),
+        unrealized_pnl: finiteNumber(item.unrealized_pnl),
+        fees: finiteNumber(item.fees),
+        fills_count: finiteNumber(item.fills_count),
+        position_value: finiteNumber(item.position_value),
+        margin_used: finiteNumber(item.margin_used),
+        side: item.side || "",
+        size: finiteNumber(item.size),
+        entry_px: finiteNumber(item.entry_px),
+        last_fill_time: item.last_fill_time || null,
+        last_fill_iso: item.last_fill_iso || null,
+      };
+      const record = byCoin.get(coin);
+      record.series.push(entry);
+      record.latest = entry;
+    });
+  });
+  return Array.from(byCoin.values())
+    .map((record) => ({
+      ...record,
+      latest: record.latest || record.series.at(-1) || {},
+    }))
+    .sort((a, b) => Math.abs(finiteNumber(b.latest.total_pnl)) - Math.abs(finiteNumber(a.latest.total_pnl)));
+}
+
+function pnlSparkline(series) {
+  const points = series
+    .filter((row) => Number.isFinite(Number(row.ts)) && Number.isFinite(Number(row.total_pnl)))
+    .slice(-120);
+  const width = 170;
+  const height = 44;
+  if (points.length < 2) {
+    return `<svg viewBox="0 0 ${width} ${height}" aria-hidden="true"><line x1="8" y1="22" x2="${width - 8}" y2="22" /></svg>`;
+  }
+  const minTs = Math.min(...points.map((row) => Number(row.ts)));
+  const maxTs = Math.max(...points.map((row) => Number(row.ts)));
+  const values = points.map((row) => Number(row.total_pnl));
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 0);
+  const pad = Math.max(0.5, (max - min) * 0.16);
+  const low = min - pad;
+  const high = max + pad;
+  const xFor = (row) => 8 + ((Number(row.ts) - minTs) / Math.max(1, maxTs - minTs)) * (width - 16);
+  const yFor = (value) => height - 8 - ((Number(value) - low) / Math.max(1, high - low)) * (height - 16);
+  const zeroY = yFor(0);
+  const path = points.map((row) => `${xFor(row).toFixed(1)},${yFor(row.total_pnl).toFixed(1)}`).join(" ");
+  return `
+    <svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
+      <line x1="8" y1="${zeroY.toFixed(1)}" x2="${width - 8}" y2="${zeroY.toFixed(1)}" />
+      <polyline points="${path}" />
+    </svg>
+  `;
+}
+
+function renderSymbolPnl(rows) {
+  const box = $("testnetSymbolPnl");
+  if (!box) return;
+  const records = buildSymbolPnlHistory(rows);
+  if (!records.length) {
+    box.innerHTML = `<div class="empty compact-empty">暂无交易对盈亏快照；下一次账户同步后会继续累积。</div>`;
+    return;
+  }
+  box.innerHTML = records
+    .slice(0, 12)
+    .map((record) => {
+      const latest = record.latest || {};
+      const total = finiteNumber(latest.total_pnl);
+      const tone = total >= 0 ? "positive" : "negative";
+      const side = latest.side ? `${String(latest.side).toUpperCase()}${latest.size ? ` ${fmtNum(latest.size, 6)}` : ""}` : "无持仓";
+      return `
+        <article class="symbol-pnl-row ${tone}">
+          <div class="symbol-pnl-main">
+            <div>
+              <strong>${escapeHtml(record.coin)}</strong>
+              <span>${escapeHtml(side)} · 历史点 ${record.series.length} · 最近 ${fmtTime(latest.iso_ts || latest.ts)}</span>
+            </div>
+            <b>${total >= 0 ? "+" : ""}${fmtNum(total)}</b>
+          </div>
+          <div class="symbol-pnl-chart">${pnlSparkline(record.series)}</div>
+          <div class="symbol-pnl-metrics">
+            <span>已实现 <b>${fmtNum(latest.realized_pnl)}</b></span>
+            <span>未实现 <b class="${finiteNumber(latest.unrealized_pnl) >= 0 ? "up-text" : "down-text"}">${finiteNumber(latest.unrealized_pnl) >= 0 ? "+" : ""}${fmtNum(latest.unrealized_pnl)}</b></span>
+            <span>手续费 <b>${fmtNum(latest.fees)}</b></span>
+            <span>名义 <b>${fmtNum(latest.position_value)}</b></span>
+            <span>成交 <b>${fmtNum(latest.fills_count, 0)}</b></span>
+            <span>最近成交 <b>${latest.last_fill_iso ? fmtTime(latest.last_fill_iso) : "--"}</b></span>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
 }
 
 function periodLabel(key) {

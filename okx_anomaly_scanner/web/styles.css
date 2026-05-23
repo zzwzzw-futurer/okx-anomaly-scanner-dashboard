@@ -379,6 +379,113 @@ h3 {
   background: rgba(0, 0, 0, 0.16);
 }
 
+.symbol-pnl-panel {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.symbol-pnl-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.symbol-pnl-row {
+  min-width: 0;
+  border: 1px solid rgba(153, 179, 204, 0.14);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.026);
+}
+
+.symbol-pnl-row.positive {
+  border-color: rgba(77, 240, 168, 0.2);
+}
+
+.symbol-pnl-row.negative {
+  border-color: rgba(255, 88, 116, 0.22);
+}
+
+.symbol-pnl-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.symbol-pnl-main strong,
+.symbol-pnl-main b {
+  display: block;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.symbol-pnl-main b {
+  color: var(--green);
+  text-align: right;
+}
+
+.symbol-pnl-row.negative .symbol-pnl-main b {
+  color: var(--red);
+}
+
+.symbol-pnl-main span {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.symbol-pnl-chart {
+  height: 44px;
+  margin: 8px 0;
+}
+
+.symbol-pnl-chart svg {
+  width: 100%;
+  height: 44px;
+  overflow: visible;
+}
+
+.symbol-pnl-chart line {
+  stroke: rgba(153, 179, 204, 0.2);
+  stroke-width: 1;
+}
+
+.symbol-pnl-chart polyline {
+  fill: none;
+  stroke: var(--cyan);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
+.symbol-pnl-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.symbol-pnl-metrics span {
+  min-width: 0;
+  border: 1px solid rgba(153, 179, 204, 0.1);
+  border-radius: 6px;
+  padding: 6px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.14);
+  font-size: 11px;
+}
+
+.symbol-pnl-metrics b {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+
 .trade-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
@@ -1244,6 +1351,10 @@ td {
   }
 
   .trade-pnl-board {
+    grid-template-columns: 1fr;
+  }
+
+  .symbol-pnl-list {
     grid-template-columns: 1fr;
   }
 
