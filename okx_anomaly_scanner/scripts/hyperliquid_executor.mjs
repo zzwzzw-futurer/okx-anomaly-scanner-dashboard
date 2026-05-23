@@ -139,6 +139,7 @@ function defaultState() {
     seen_alert_ids: [],
     trades: [],
     account: null,
+    account_series: [],
     open_orders: [],
     fills: [],
     last_cycle: null,
@@ -322,6 +323,40 @@ function simplifyFills(rows) {
     iso_ts: row.time ? iso(row.time) : null,
     direction: row.dir || null,
   }));
+}
+
+function accountSeriesPoint(state) {
+  if (!state.account) return null;
+  const current = nowMs();
+  const accountValue = num(state.account.account_value);
+  const startingCapital = num(state.session?.starting_capital_usd);
+  const unrealizedPnl = (state.account.positions || []).reduce((sum, position) => sum + num(position.unrealized_pnl), 0);
+  return {
+    ts: current,
+    iso_ts: iso(current),
+    account_value: accountValue,
+    starting_capital_usd: startingCapital,
+    total_pnl: startingCapital ? accountValue - startingCapital : 0,
+    total_pnl_pct: startingCapital ? ((accountValue - startingCapital) / startingCapital) * 100 : 0,
+    unrealized_pnl: unrealizedPnl,
+    withdrawable: num(state.account.withdrawable),
+    total_position_notional: num(state.account.total_position_notional),
+    total_margin_used: num(state.account.total_margin_used),
+    positions_count: (state.account.positions || []).length,
+  };
+}
+
+function appendAccountSeriesPoint(state) {
+  const point = accountSeriesPoint(state);
+  if (!point) return;
+  const rows = Array.isArray(state.account_series) ? state.account_series : [];
+  const previous = rows.at(-1);
+  if (previous && point.ts - num(previous.ts) < 60_000) {
+    rows[rows.length - 1] = point;
+  } else {
+    rows.push(point);
+  }
+  state.account_series = rows.slice(-1000);
 }
 
 async function syncAccountSnapshot(info, state, userAddress) {
@@ -589,10 +624,13 @@ async function runAutoCycle(args, syncOnly = false) {
   }
   try {
     await syncAccountSnapshot(info, state, configuredAddress);
+    appendAccountSeriesPoint(state);
   } catch (error) {
     await recordEvent(state, "account_resync_error", { message: error.message });
   }
-  if (state.status !== "cycle_error") {
+  if (syncOnly) {
+    state.status = sessionActive(state) ? "synced" : "waiting_for_testnet_credentials";
+  } else if (state.status !== "cycle_error") {
     state.status = sessionActive(state) ? "running" : "waiting_for_testnet_credentials";
   }
   state.last_cycle = {

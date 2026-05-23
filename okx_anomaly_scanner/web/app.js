@@ -477,6 +477,7 @@ function renderTestnetTrading() {
   const snapshot = payload.state || {};
   const account = snapshot.account || {};
   const session = snapshot.session || {};
+  const accountSeries = Array.isArray(snapshot.account_series) ? snapshot.account_series : [];
   const events = payload.events || [];
   const trades = snapshot.trades || [];
   const positions = account.positions || [];
@@ -484,28 +485,42 @@ function renderTestnetTrading() {
   const sessionEnds = session.ends_at || session.ends_at_ms;
   const status = snapshot.status || "未启动";
   const credentials = snapshot.credentials || "未检查";
+  const startingCapital = Number(session.starting_capital_usd || accountSeries[0]?.starting_capital_usd || 0);
+  const accountValue = Number(account.account_value);
+  const totalPnl = Number.isFinite(accountValue) && startingCapital ? accountValue - startingCapital : null;
+  const totalPnlPct = totalPnl !== null && startingCapital ? (totalPnl / startingCapital) * 100 : null;
+  const unrealizedPnl = positions.reduce((sum, position) => sum + Number(position.unrealized_pnl || 0), 0);
+  const pnlClass = totalPnl === null ? "" : totalPnl >= 0 ? "positive" : "negative";
 
   $("testnetSessionPill").textContent = sessionEnds
     ? `${status} · 至 ${fmtTime(sessionEnds)}`
     : "等待3天testnet会话";
-  $("testnetTradeSummary").innerHTML = [
-    ["会话", session.id ? `强信号 ${session.days || 3} 天` : "未启动", session.starts_at ? `起始 ${fmtTime(session.starts_at)}` : "运行 --auto-once 后生成"],
-    ["账户", snapshot.account_address || "--", `凭据 ${credentials}`],
-    ["权益", account.account_value === undefined ? "--" : `${fmtNum(account.account_value)} USDC`, `可提 ${fmtNum(account.withdrawable)}`],
-    ["持仓", positions.length, `名义 ${fmtNum(account.total_position_notional)}`],
-    ["交易记录", trades.length, `${trades.filter((row) => row.status === "open").length} 个执行器持仓`],
-    ["最近循环", snapshot.last_cycle?.iso_ts ? fmtTime(snapshot.last_cycle.iso_ts) : "--", snapshot.last_cycle?.only_severity || "只接强信号"],
-  ]
+  const summaryItems = [
+    { label: "会话", value: session.id ? `强信号 ${session.days || 3} 天` : "未启动", sub: session.starts_at ? `起始 ${fmtTime(session.starts_at)}` : "运行 --auto-once 后生成" },
+    { label: "账户", value: snapshot.account_address || "--", sub: `凭据 ${credentials}` },
+    { label: "权益", value: account.account_value === undefined ? "--" : `${fmtNum(account.account_value)} USDC`, sub: `可提 ${fmtNum(account.withdrawable)}` },
+    {
+      label: "总盈亏",
+      value: totalPnl === null ? "--" : `${totalPnl >= 0 ? "+" : ""}${fmtNum(totalPnl)} (${fmtPct(totalPnlPct)})`,
+      sub: `基准 ${fmtNum(startingCapital)}`,
+      tone: pnlClass,
+    },
+    { label: "持仓", value: positions.length, sub: `名义 ${fmtNum(account.total_position_notional)}` },
+    { label: "交易记录", value: trades.length, sub: `${trades.filter((row) => row.status === "open").length} 个执行器持仓` },
+    { label: "最近循环", value: snapshot.last_cycle?.iso_ts ? fmtTime(snapshot.last_cycle.iso_ts) : "--", sub: snapshot.last_cycle?.only_severity || "只接强信号" },
+  ];
+  $("testnetTradeSummary").innerHTML = summaryItems
     .map(
-      ([label, value, sub]) => `
-        <div class="trade-stat">
-          <span>${escapeHtml(label)}</span>
-          <strong>${escapeHtml(value)}</strong>
-          <em>${escapeHtml(sub)}</em>
+      (item) => `
+        <div class="trade-stat ${item.tone || ""}">
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${escapeHtml(item.value)}</strong>
+          <em>${escapeHtml(item.sub)}</em>
         </div>
       `,
     )
     .join("");
+  renderTestnetPnl(accountSeries, { startingCapital, accountValue, totalPnl, totalPnlPct, unrealizedPnl });
 
   $("testnetPositions").innerHTML = positions.length
     ? positions
@@ -559,6 +574,125 @@ function renderTestnetTrading() {
         })
         .join("")
     : `<div class="empty compact-empty">执行器还没有写入强信号交易轨迹。</div>`;
+}
+
+function renderTestnetPnl(accountSeries, metrics) {
+  const currentPoint =
+    Number.isFinite(metrics.accountValue) && metrics.startingCapital
+      ? {
+          ts: Date.now(),
+          iso_ts: new Date().toISOString(),
+          account_value: metrics.accountValue,
+          starting_capital_usd: metrics.startingCapital,
+          total_pnl: metrics.totalPnl,
+          total_pnl_pct: metrics.totalPnlPct,
+          unrealized_pnl: metrics.unrealizedPnl,
+        }
+      : null;
+  const rows = accountSeries
+    .concat(currentPoint ? [currentPoint] : [])
+    .filter((row) => Number.isFinite(Number(row.ts)) && Number.isFinite(Number(row.account_value)))
+    .sort((a, b) => Number(a.ts) - Number(b.ts))
+    .filter((row, index, list) => index === list.length - 1 || Number(row.ts) !== Number(list[index + 1].ts));
+  const latest = rows.at(-1) || currentPoint || {};
+  const pnl = Number(latest.total_pnl ?? metrics.totalPnl);
+  const pnlPct = Number(latest.total_pnl_pct ?? metrics.totalPnlPct);
+  const unrealized = Number(latest.unrealized_pnl ?? metrics.unrealizedPnl);
+  const value = Number(latest.account_value ?? metrics.accountValue);
+  const tone = Number.isFinite(pnl) && pnl >= 0 ? "positive" : "negative";
+
+  $("testnetPnlSummary").innerHTML = `
+    <div class="pnl-main ${tone}">
+      <span>账户总盈亏</span>
+      <strong>${Number.isFinite(pnl) ? `${pnl >= 0 ? "+" : ""}${fmtNum(pnl)}` : "--"}</strong>
+      <em>${Number.isFinite(pnlPct) ? fmtPct(pnlPct) : "--"} · 当前权益 ${fmtNum(value)}</em>
+    </div>
+    <div class="pnl-side">
+      <span>未实现盈亏 <b class="${unrealized >= 0 ? "up-text" : "down-text"}">${unrealized >= 0 ? "+" : ""}${fmtNum(unrealized)}</b></span>
+      <span>数据点 <b>${rows.length}</b></span>
+      <span>最近更新 <b>${latest.iso_ts ? fmtTime(latest.iso_ts) : "--"}</b></span>
+    </div>
+  `;
+  drawPnlChart(rows, metrics.startingCapital);
+}
+
+function drawPnlChart(rows, startingCapital) {
+  const canvas = $("testnetPnlChart");
+  const legend = $("testnetPnlLegend");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(320, rect.width || 320);
+  const height = 240;
+  const scale = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * scale);
+  canvas.height = Math.floor(height * scale);
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "rgba(255,255,255,0.022)";
+  ctx.fillRect(12, 12, width - 24, height - 34);
+  drawGrid(ctx, width, height);
+
+  if (rows.length < 2) {
+    ctx.fillStyle = "#8ea0b6";
+    ctx.font = "12px Inter, sans-serif";
+    ctx.fillText("等待更多账户快照形成时间序列", 22, 42);
+    legend.innerHTML = rows.length
+      ? `<span>权益 ${fmtNum(rows[0].account_value)}</span><span>总盈亏 ${fmtNum(rows[0].total_pnl)}</span>`
+      : `<span>暂无权益序列</span>`;
+    return;
+  }
+
+  const minTs = Math.min(...rows.map((row) => Number(row.ts)));
+  const maxTs = Math.max(...rows.map((row) => Number(row.ts)));
+  const values = rows.flatMap((row) => [Number(row.account_value), Number(startingCapital)]).filter(Number.isFinite);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const pad = Math.max(1, (max - min) * 0.12);
+  const low = min - pad;
+  const high = max + pad;
+  const left = 18;
+  const right = width - 18;
+  const top = 18;
+  const bottom = height - 32;
+  const xFor = (row) => left + ((Number(row.ts) - minTs) / Math.max(1, maxTs - minTs)) * (right - left);
+  const yForValue = (value) => bottom - ((Number(value) - low) / Math.max(1, high - low)) * (bottom - top);
+
+  if (Number.isFinite(Number(startingCapital))) {
+    const y = yForValue(startingCapital);
+    ctx.strokeStyle = "rgba(255, 202, 92, 0.5)";
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(right, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.strokeStyle = "#38d5ff";
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  rows.forEach((row, index) => {
+    const x = xFor(row);
+    const y = yForValue(row.account_value);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  const last = rows.at(-1);
+  const lastX = xFor(last);
+  const lastY = yForValue(last.account_value);
+  ctx.fillStyle = Number(last.total_pnl) >= 0 ? "#4df0a8" : "#ff5874";
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  legend.innerHTML = `
+    <span>权益 ${fmtNum(rows[0].account_value)} → ${fmtNum(last.account_value)}</span>
+    <span>基准 ${fmtNum(startingCapital)}</span>
+    <span>总盈亏 ${Number(last.total_pnl) >= 0 ? "+" : ""}${fmtNum(last.total_pnl)} (${fmtPct(last.total_pnl_pct)})</span>
+  `;
 }
 
 function fmtAge(minutes) {
