@@ -1,0 +1,15 @@
+[Unit]
+Description=OKX Hyperliquid testnet read-only account sync
+After=network-online.target okx-dashboard.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/okx_anomaly_scanner
+ExecStart=/usr/bin/node /opt/okx_anomaly_scanner/scripts/hyperliquid_executor.mjs --config /opt/okx_anomaly_scanner/config.vps.json --sync-loop
+Restart=always
+RestartSec=15
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

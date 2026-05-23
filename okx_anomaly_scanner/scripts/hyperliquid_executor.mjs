@@ -18,6 +18,7 @@ function parseArgs(argv) {
     autoOnce: false,
     autoLoop: false,
     syncState: false,
+    syncLoop: false,
     live: false,
   };
   for (let index = 2; index < argv.length; index += 1) {
@@ -27,6 +28,7 @@ function parseArgs(argv) {
     else if (item === "--auto-once") args.autoOnce = true;
     else if (item === "--auto-loop") args.autoLoop = true;
     else if (item === "--sync-state") args.syncState = true;
+    else if (item === "--sync-loop") args.syncLoop = true;
     else if (item === "--live") args.live = true;
     else if (item === "--help") args.help = true;
   }
@@ -656,6 +658,17 @@ async function runAutoLoop(args) {
   }
 }
 
+async function runSyncLoop(args) {
+  while (true) {
+    const { execution } = await loadConfigAndEnv(args);
+    const state = await runAutoCycle(args, true);
+    console.log(JSON.stringify({ status: state.status, last_cycle: state.last_cycle, session: state.session }, null, 2));
+    if (state.status === "session_complete") return 0;
+    const waitMs = Math.max(30, num(execution.testnet_loop_interval_seconds, 300)) * 1000;
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
+
 async function loadHyperliquidMids(network) {
   const { info } = await buildInfo(network);
   return info.allMids();
@@ -716,8 +729,9 @@ async function main() {
         "  node scripts/hyperliquid_executor.mjs --auto-once [--config config.json]",
         "  node scripts/hyperliquid_executor.mjs --auto-loop [--config config.json]",
         "  node scripts/hyperliquid_executor.mjs --sync-state [--config config.json]",
+        "  node scripts/hyperliquid_executor.mjs --sync-loop [--config config.json]",
         "",
-        "The autonomous modes are hard-wired to Hyperliquid testnet and only consume strong OKX alerts.",
+        "The autonomous modes are hard-wired to Hyperliquid testnet and only consume strong OKX alerts. Sync modes are read-only.",
       ].join("\n"),
     );
     return 0;
@@ -726,6 +740,7 @@ async function main() {
     throw new Error("Mainnet/live execution is not implemented here. Use Hyperliquid testnet autonomous modes only.");
   }
   if (args.autoLoop) return runAutoLoop(args);
+  if (args.syncLoop) return runSyncLoop(args);
   if (args.autoOnce || args.syncState) {
     const state = await runAutoCycle(args, args.syncState);
     console.log(JSON.stringify({ status: state.status, credentials: state.credentials, session: state.session, last_event: state.last_event }, null, 2));
