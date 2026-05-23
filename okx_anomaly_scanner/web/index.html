@@ -45,7 +45,12 @@
           <div class="trade-pnl-board">
             <div id="testnetPnlSummary" class="trade-pnl-summary"></div>
             <div class="trade-chart-card">
+              <div class="trade-chart-head">
+                <span>权益曲线</span>
+                <div id="testnetPnlPeriods" class="period-toggle" aria-label="选择盈亏图表周期"></div>
+              </div>
               <canvas id="testnetPnlChart" height="240"></canvas>
+              <div id="testnetPnlTooltip" class="trade-chart-tooltip" hidden></div>
               <div id="testnetPnlLegend" class="trade-chart-legend"></div>
             </div>
           </div>

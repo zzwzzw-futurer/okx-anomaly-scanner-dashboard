@@ -287,7 +287,79 @@ h3 {
 }
 
 .trade-chart-card {
+  position: relative;
   overflow: hidden;
+}
+
+.trade-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px 0;
+}
+
+.trade-chart-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.period-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.period-toggle button {
+  min-width: 40px;
+  height: 26px;
+  color: var(--muted);
+  border: 1px solid rgba(153, 179, 204, 0.18);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 11px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.period-toggle button.active {
+  color: var(--cyan);
+  border-color: rgba(56, 213, 255, 0.5);
+  background: rgba(56, 213, 255, 0.12);
+}
+
+.period-toggle button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.trade-chart-tooltip {
+  position: absolute;
+  z-index: 4;
+  width: 190px;
+  border: 1px solid rgba(56, 213, 255, 0.35);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(4, 11, 18, 0.94);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.trade-chart-tooltip strong,
+.trade-chart-tooltip span {
+  display: block;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.trade-chart-tooltip strong {
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.trade-chart-tooltip span {
+  color: var(--muted);
 }
 
 .trade-chart-legend {
@@ -1173,6 +1245,11 @@ td {
 
   .trade-pnl-board {
     grid-template-columns: 1fr;
+  }
+
+  .trade-chart-head {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .trade-grid {

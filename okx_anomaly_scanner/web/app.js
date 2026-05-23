@@ -1,9 +1,18 @@
 const state = {
   data: null,
   filters: { search: "", severity: "all", direction: "all" },
+  pnlPeriod: "24h",
+  pnlChart: null,
 };
 
 const DASHBOARD_REFRESH_MS = 5 * 60_000;
+const PNL_PERIODS = [
+  { key: "1h", label: "1H", ms: 60 * 60_000 },
+  { key: "6h", label: "6H", ms: 6 * 60 * 60_000 },
+  { key: "24h", label: "24H", ms: 24 * 60 * 60_000 },
+  { key: "3d", label: "3D", ms: 3 * 24 * 60 * 60_000 },
+  { key: "all", label: "ALL", ms: Infinity },
+];
 const $ = (id) => document.getElementById(id);
 
 function fmtTime(value, mode = "full") {
@@ -594,6 +603,7 @@ function renderTestnetPnl(accountSeries, metrics) {
     .filter((row) => Number.isFinite(Number(row.ts)) && Number.isFinite(Number(row.account_value)))
     .sort((a, b) => Number(a.ts) - Number(b.ts))
     .filter((row, index, list) => index === list.length - 1 || Number(row.ts) !== Number(list[index + 1].ts));
+  const visibleRows = filterPnlRows(rows);
   const latest = rows.at(-1) || currentPoint || {};
   const pnl = Number(latest.total_pnl ?? metrics.totalPnl);
   const pnlPct = Number(latest.total_pnl_pct ?? metrics.totalPnlPct);
@@ -610,13 +620,40 @@ function renderTestnetPnl(accountSeries, metrics) {
     <div class="pnl-side">
       <span>未实现盈亏 <b class="${unrealized >= 0 ? "up-text" : "down-text"}">${unrealized >= 0 ? "+" : ""}${fmtNum(unrealized)}</b></span>
       <span>数据点 <b>${rows.length}</b></span>
+      <span>当前周期 <b>${escapeHtml(periodLabel(state.pnlPeriod))}</b></span>
       <span>最近更新 <b>${latest.iso_ts ? fmtTime(latest.iso_ts) : "--"}</b></span>
     </div>
   `;
-  drawPnlChart(rows, metrics.startingCapital);
+  renderPnlPeriodControls(rows);
+  drawPnlChart(visibleRows, metrics.startingCapital, rows.length);
 }
 
-function drawPnlChart(rows, startingCapital) {
+function periodLabel(key) {
+  return PNL_PERIODS.find((item) => item.key === key)?.label || "24H";
+}
+
+function filterPnlRows(rows) {
+  if (!rows.length) return rows;
+  const selected = PNL_PERIODS.find((item) => item.key === state.pnlPeriod) || PNL_PERIODS[2];
+  if (!Number.isFinite(selected.ms)) return rows;
+  const latestTs = Number(rows.at(-1).ts);
+  const cutoff = latestTs - selected.ms;
+  const filtered = rows.filter((row) => Number(row.ts) >= cutoff);
+  return filtered.length ? filtered : rows.slice(-1);
+}
+
+function renderPnlPeriodControls(rows) {
+  const box = $("testnetPnlPeriods");
+  if (!box) return;
+  box.innerHTML = PNL_PERIODS.map((item) => {
+    const hasDataForPeriod =
+      item.key === "all" || rows.some((row) => Number(row.ts) >= Number(rows.at(-1)?.ts || 0) - item.ms);
+    const enabled = item.key === state.pnlPeriod || (rows.length > 0 && hasDataForPeriod);
+    return `<button type="button" class="${item.key === state.pnlPeriod ? "active" : ""}" data-period="${item.key}" ${enabled ? "" : "disabled"}>${item.label}</button>`;
+  }).join("");
+}
+
+function drawPnlChart(rows, startingCapital, totalPointCount = rows.length) {
   const canvas = $("testnetPnlChart");
   const legend = $("testnetPnlLegend");
   if (!canvas) return;
@@ -630,15 +667,16 @@ function drawPnlChart(rows, startingCapital) {
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "rgba(255,255,255,0.022)";
-  ctx.fillRect(12, 12, width - 24, height - 34);
+  ctx.fillRect(12, 12, width - 24, height - 42);
   drawGrid(ctx, width, height);
+  state.pnlChart = null;
 
   if (rows.length < 2) {
     ctx.fillStyle = "#8ea0b6";
     ctx.font = "12px Inter, sans-serif";
     ctx.fillText("等待更多账户快照形成时间序列", 22, 42);
     legend.innerHTML = rows.length
-      ? `<span>权益 ${fmtNum(rows[0].account_value)}</span><span>总盈亏 ${fmtNum(rows[0].total_pnl)}</span>`
+      ? `<span>${periodLabel(state.pnlPeriod)} · 1/${totalPointCount} 点</span><span>权益 ${fmtNum(rows[0].account_value)}</span><span>总盈亏 ${fmtNum(rows[0].total_pnl)}</span>`
       : `<span>暂无权益序列</span>`;
     return;
   }
@@ -654,7 +692,7 @@ function drawPnlChart(rows, startingCapital) {
   const left = 18;
   const right = width - 18;
   const top = 18;
-  const bottom = height - 32;
+  const bottom = height - 40;
   const xFor = (row) => left + ((Number(row.ts) - minTs) / Math.max(1, maxTs - minTs)) * (right - left);
   const yForValue = (value) => bottom - ((Number(value) - low) / Math.max(1, high - low)) * (bottom - top);
 
@@ -688,11 +726,53 @@ function drawPnlChart(rows, startingCapital) {
   ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
   ctx.fill();
 
+  ctx.fillStyle = "#8ea0b6";
+  ctx.font = "11px Inter, sans-serif";
+  ctx.fillText(fmtTime(minTs, "short"), left, height - 14);
+  const rightLabel = fmtTime(maxTs, "short");
+  ctx.fillText(rightLabel, Math.max(left, right - ctx.measureText(rightLabel).width), height - 14);
+
+  state.pnlChart = {
+    rows: rows.map((row) => ({ ...row, x: xFor(row), y: yForValue(row.account_value) })),
+    left,
+    right,
+    top,
+    bottom,
+    width,
+    height,
+  };
   legend.innerHTML = `
+    <span>${periodLabel(state.pnlPeriod)} · ${rows.length}/${totalPointCount} 点</span>
     <span>权益 ${fmtNum(rows[0].account_value)} → ${fmtNum(last.account_value)}</span>
     <span>基准 ${fmtNum(startingCapital)}</span>
     <span>总盈亏 ${Number(last.total_pnl) >= 0 ? "+" : ""}${fmtNum(last.total_pnl)} (${fmtPct(last.total_pnl_pct)})</span>
   `;
+}
+
+function updatePnlTooltip(clientX) {
+  const chart = state.pnlChart;
+  const canvas = $("testnetPnlChart");
+  const tooltip = $("testnetPnlTooltip");
+  if (!chart?.rows?.length || !canvas || !tooltip) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.max(chart.left, Math.min(chart.right, clientX - rect.left));
+  const point = chart.rows.reduce((best, row) => (Math.abs(row.x - x) < Math.abs(best.x - x) ? row : best), chart.rows[0]);
+  tooltip.hidden = false;
+  tooltip.innerHTML = `
+    <strong>${fmtTime(point.iso_ts || point.ts)}</strong>
+    <span>权益 ${fmtNum(point.account_value)}</span>
+    <span class="${Number(point.total_pnl) >= 0 ? "up-text" : "down-text"}">总盈亏 ${Number(point.total_pnl) >= 0 ? "+" : ""}${fmtNum(point.total_pnl)} (${fmtPct(point.total_pnl_pct)})</span>
+    <span>未实现 ${Number(point.unrealized_pnl) >= 0 ? "+" : ""}${fmtNum(point.unrealized_pnl)}</span>
+  `;
+  const tooltipWidth = 190;
+  const targetLeft = Math.max(10, Math.min(rect.width - tooltipWidth - 10, point.x + 12));
+  tooltip.style.left = `${targetLeft}px`;
+  tooltip.style.top = `${Math.max(10, point.y - 82)}px`;
+}
+
+function hidePnlTooltip() {
+  const tooltip = $("testnetPnlTooltip");
+  if (tooltip) tooltip.hidden = true;
 }
 
 function fmtAge(minutes) {
@@ -1116,6 +1196,14 @@ function wireEvents() {
     state.filters.direction = event.target.value;
     renderHistory();
   });
+  $("testnetPnlPeriods")?.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-period]");
+    if (!button || button.disabled) return;
+    state.pnlPeriod = button.dataset.period || "24h";
+    renderTestnetTrading();
+  });
+  $("testnetPnlChart")?.addEventListener("pointermove", (event) => updatePnlTooltip(event.clientX));
+  $("testnetPnlChart")?.addEventListener("pointerleave", hidePnlTooltip);
 }
 
 wireEvents();
