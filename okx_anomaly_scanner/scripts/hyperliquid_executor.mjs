@@ -395,20 +395,37 @@ function buildCoinPnlSnapshot(positions = [], fills = []) {
     .sort((a, b) => Math.abs(num(b.total_pnl)) - Math.abs(num(a.total_pnl)));
 }
 
+function ensureAccountBaseline(state) {
+  if (!state.session) return 0;
+  const existing = num(state.session.account_baseline_usd);
+  if (existing) return existing;
+  const rows = Array.isArray(state.account_series) ? state.account_series : [];
+  const firstPoint = rows.find((row) => num(row.account_value) > 0);
+  const baseline = num(firstPoint?.baseline_account_value || firstPoint?.account_value || state.account?.account_value);
+  if (!baseline) return 0;
+  state.session.account_baseline_usd = baseline;
+  state.session.account_baseline_at = firstPoint?.iso_ts || state.account?.iso_ts || iso();
+  state.session.configured_capital_usd = num(state.session.starting_capital_usd);
+  return baseline;
+}
+
 function accountSeriesPoint(state) {
   if (!state.account) return null;
   const current = nowMs();
   const accountValue = num(state.account.account_value);
-  const startingCapital = num(state.session?.starting_capital_usd);
+  const configuredCapital = num(state.session?.starting_capital_usd);
+  const accountBaseline = ensureAccountBaseline(state) || accountValue || configuredCapital;
   const unrealizedPnl = (state.account.positions || []).reduce((sum, position) => sum + num(position.unrealized_pnl), 0);
   const coinPnl = buildCoinPnlSnapshot(state.account.positions || [], state.fills || []);
   return {
     ts: current,
     iso_ts: iso(current),
     account_value: accountValue,
-    starting_capital_usd: startingCapital,
-    total_pnl: startingCapital ? accountValue - startingCapital : 0,
-    total_pnl_pct: startingCapital ? ((accountValue - startingCapital) / startingCapital) * 100 : 0,
+    starting_capital_usd: configuredCapital,
+    configured_capital_usd: configuredCapital,
+    baseline_account_value: accountBaseline,
+    total_pnl: accountBaseline ? accountValue - accountBaseline : 0,
+    total_pnl_pct: accountBaseline ? ((accountValue - accountBaseline) / accountBaseline) * 100 : 0,
     unrealized_pnl: unrealizedPnl,
     withdrawable: num(state.account.withdrawable),
     total_position_notional: num(state.account.total_position_notional),

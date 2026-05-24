@@ -494,12 +494,14 @@ function renderTestnetTrading() {
   const sessionEnds = session.ends_at || session.ends_at_ms;
   const status = snapshot.status || "未启动";
   const credentials = snapshot.credentials || "未检查";
-  const startingCapital = Number(session.starting_capital_usd || accountSeries[0]?.starting_capital_usd || 0);
+  const configuredCapital = Number(session.configured_capital_usd || session.starting_capital_usd || accountSeries[0]?.configured_capital_usd || accountSeries[0]?.starting_capital_usd || 0);
   const accountValue = Number(account.account_value);
-  const totalPnl = Number.isFinite(accountValue) && startingCapital ? accountValue - startingCapital : null;
-  const totalPnlPct = totalPnl !== null && startingCapital ? (totalPnl / startingCapital) * 100 : null;
   const unrealizedPnl = positions.reduce((sum, position) => sum + Number(position.unrealized_pnl || 0), 0);
-  const pnlRows = normalizePnlRows(accountSeries, { startingCapital, accountValue, totalPnl, totalPnlPct, unrealizedPnl, positions, fills });
+  const pnlRows = normalizePnlRows(accountSeries, { configuredCapital, accountValue, unrealizedPnl, positions, fills, session });
+  const latestPnlRow = pnlRows.at(-1) || {};
+  const trackingBaseline = Number(latestPnlRow.baseline_account_value || derivePnlBaseline(pnlRows, { configuredCapital, accountValue, session }));
+  const totalPnl = Number.isFinite(Number(latestPnlRow.total_pnl)) ? Number(latestPnlRow.total_pnl) : null;
+  const totalPnlPct = Number.isFinite(Number(latestPnlRow.total_pnl_pct)) ? Number(latestPnlRow.total_pnl_pct) : null;
   const pnlClass = totalPnl === null ? "" : totalPnl >= 0 ? "positive" : "negative";
 
   $("testnetSessionPill").textContent = sessionEnds
@@ -512,7 +514,7 @@ function renderTestnetTrading() {
     {
       label: "总盈亏",
       value: totalPnl === null ? "--" : `${totalPnl >= 0 ? "+" : ""}${fmtNum(totalPnl)} (${fmtPct(totalPnlPct)})`,
-      sub: `基准 ${fmtNum(startingCapital)}`,
+      sub: `权益基准 ${fmtNum(trackingBaseline)} · 配置 ${fmtNum(configuredCapital)}`,
       tone: pnlClass,
     },
     { label: "持仓", value: positions.length, sub: `名义 ${fmtNum(account.total_position_notional)}` },
@@ -530,7 +532,7 @@ function renderTestnetTrading() {
       `,
     )
     .join("");
-  renderTestnetPnl(pnlRows, { startingCapital, accountValue, totalPnl, totalPnlPct, unrealizedPnl });
+  renderTestnetPnl(pnlRows, { trackingBaseline, configuredCapital, accountValue, totalPnl, totalPnlPct, unrealizedPnl });
   renderSymbolPnl(pnlRows);
 
   $("testnetPositions").innerHTML = positions.length
@@ -657,26 +659,47 @@ function buildCoinPnlSnapshot(positions = [], fills = []) {
     .sort((a, b) => Math.abs(finiteNumber(b.total_pnl)) - Math.abs(finiteNumber(a.total_pnl)));
 }
 
+function derivePnlBaseline(rows, metrics = {}) {
+  const explicit = Number(metrics.session?.account_baseline_usd || rows.find((row) => Number(row.baseline_account_value) > 0)?.baseline_account_value);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  const firstAccountValue = Number(rows.find((row) => Number(row.account_value) > 0)?.account_value);
+  if (Number.isFinite(firstAccountValue) && firstAccountValue > 0) return firstAccountValue;
+  const currentValue = Number(metrics.accountValue);
+  if (Number.isFinite(currentValue) && currentValue > 0) return currentValue;
+  return Number(metrics.configuredCapital || metrics.startingCapital || 0);
+}
+
 function normalizePnlRows(accountSeries, metrics) {
   const currentPoint =
-    Number.isFinite(metrics.accountValue) && metrics.startingCapital
+    Number.isFinite(metrics.accountValue)
       ? {
           ts: Date.now(),
           iso_ts: new Date().toISOString(),
           account_value: metrics.accountValue,
-          starting_capital_usd: metrics.startingCapital,
-          total_pnl: metrics.totalPnl,
-          total_pnl_pct: metrics.totalPnlPct,
+          starting_capital_usd: metrics.configuredCapital,
+          configured_capital_usd: metrics.configuredCapital,
           unrealized_pnl: metrics.unrealizedPnl,
           positions: metrics.positions || [],
           coin_pnl: buildCoinPnlSnapshot(metrics.positions || [], metrics.fills || []),
         }
       : null;
-  return accountSeries
+  const rows = accountSeries
     .concat(currentPoint ? [currentPoint] : [])
     .filter((row) => Number.isFinite(Number(row.ts)) && Number.isFinite(Number(row.account_value)))
     .sort((a, b) => Number(a.ts) - Number(b.ts))
     .filter((row, index, list) => index === list.length - 1 || Number(row.ts) !== Number(list[index + 1].ts));
+  const baseline = derivePnlBaseline(rows, metrics);
+  return rows.map((row) => {
+    const accountValue = Number(row.account_value);
+    const totalPnl = Number.isFinite(accountValue) && baseline ? accountValue - baseline : Number(row.total_pnl || 0);
+    return {
+      ...row,
+      configured_capital_usd: Number(row.configured_capital_usd || row.starting_capital_usd || metrics.configuredCapital || 0),
+      baseline_account_value: baseline,
+      total_pnl: totalPnl,
+      total_pnl_pct: baseline ? (totalPnl / baseline) * 100 : Number(row.total_pnl_pct || 0),
+    };
+  });
 }
 
 function renderTestnetPnl(rows, metrics) {
@@ -697,12 +720,14 @@ function renderTestnetPnl(rows, metrics) {
     <div class="pnl-side">
       <span>未实现盈亏 <b class="${unrealized >= 0 ? "up-text" : "down-text"}">${unrealized >= 0 ? "+" : ""}${fmtNum(unrealized)}</b></span>
       <span>数据点 <b>${rows.length}</b></span>
+      <span>权益基准 <b>${fmtNum(metrics.trackingBaseline)}</b></span>
+      <span>配置资金 <b>${fmtNum(metrics.configuredCapital)}</b></span>
       <span>当前周期 <b>${escapeHtml(periodLabel(state.pnlPeriod))}</b></span>
       <span>最近更新 <b>${latest.iso_ts ? fmtTime(latest.iso_ts) : "--"}</b></span>
     </div>
   `;
   renderPnlPeriodControls(rows);
-  drawPnlChart(visibleRows, metrics.startingCapital, rows.length);
+  drawPnlChart(visibleRows, metrics.trackingBaseline, rows.length, metrics.configuredCapital);
 }
 
 function coinPnlRowsFromPoint(row) {
@@ -847,7 +872,7 @@ function renderPnlPeriodControls(rows) {
   }).join("");
 }
 
-function drawPnlChart(rows, startingCapital, totalPointCount = rows.length) {
+function drawPnlChart(rows, trackingBaseline, totalPointCount = rows.length, configuredCapital = null) {
   const canvas = $("testnetPnlChart");
   const legend = $("testnetPnlLegend");
   if (!canvas) return;
@@ -877,7 +902,7 @@ function drawPnlChart(rows, startingCapital, totalPointCount = rows.length) {
 
   const minTs = Math.min(...rows.map((row) => Number(row.ts)));
   const maxTs = Math.max(...rows.map((row) => Number(row.ts)));
-  const values = rows.flatMap((row) => [Number(row.account_value), Number(startingCapital)]).filter(Number.isFinite);
+  const values = rows.flatMap((row) => [Number(row.account_value), Number(trackingBaseline)]).filter(Number.isFinite);
   const min = Math.min(...values);
   const max = Math.max(...values);
   const pad = Math.max(1, (max - min) * 0.12);
@@ -890,8 +915,8 @@ function drawPnlChart(rows, startingCapital, totalPointCount = rows.length) {
   const xFor = (row) => left + ((Number(row.ts) - minTs) / Math.max(1, maxTs - minTs)) * (right - left);
   const yForValue = (value) => bottom - ((Number(value) - low) / Math.max(1, high - low)) * (bottom - top);
 
-  if (Number.isFinite(Number(startingCapital))) {
-    const y = yForValue(startingCapital);
+  if (Number.isFinite(Number(trackingBaseline))) {
+    const y = yForValue(trackingBaseline);
     ctx.strokeStyle = "rgba(255, 202, 92, 0.5)";
     ctx.setLineDash([5, 5]);
     ctx.beginPath();
@@ -938,7 +963,8 @@ function drawPnlChart(rows, startingCapital, totalPointCount = rows.length) {
   legend.innerHTML = `
     <span>${periodLabel(state.pnlPeriod)} · ${rows.length}/${totalPointCount} 点</span>
     <span>权益 ${fmtNum(rows[0].account_value)} → ${fmtNum(last.account_value)}</span>
-    <span>基准 ${fmtNum(startingCapital)}</span>
+    <span>权益基准 ${fmtNum(trackingBaseline)}</span>
+    <span>配置资金 ${fmtNum(configuredCapital)}</span>
     <span>总盈亏 ${Number(last.total_pnl) >= 0 ? "+" : ""}${fmtNum(last.total_pnl)} (${fmtPct(last.total_pnl_pct)})</span>
   `;
 }
