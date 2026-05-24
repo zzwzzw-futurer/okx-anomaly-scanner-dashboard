@@ -417,6 +417,8 @@ function accountSeriesPoint(state) {
   const accountBaseline = ensureAccountBaseline(state) || accountValue || configuredCapital;
   const unrealizedPnl = (state.account.positions || []).reduce((sum, position) => sum + num(position.unrealized_pnl), 0);
   const coinPnl = buildCoinPnlSnapshot(state.account.positions || [], state.fills || []);
+  const coinPnlTotal = coinPnl.reduce((sum, item) => sum + num(item.total_pnl), 0);
+  const totalPnl = accountBaseline ? accountValue - accountBaseline : 0;
   return {
     ts: current,
     iso_ts: iso(current),
@@ -424,9 +426,11 @@ function accountSeriesPoint(state) {
     starting_capital_usd: configuredCapital,
     configured_capital_usd: configuredCapital,
     baseline_account_value: accountBaseline,
-    total_pnl: accountBaseline ? accountValue - accountBaseline : 0,
-    total_pnl_pct: accountBaseline ? ((accountValue - accountBaseline) / accountBaseline) * 100 : 0,
+    total_pnl: totalPnl,
+    total_pnl_pct: accountBaseline ? (totalPnl / accountBaseline) * 100 : 0,
     unrealized_pnl: unrealizedPnl,
+    coin_pnl_total: coinPnlTotal,
+    pnl_reconciliation: totalPnl - coinPnlTotal,
     withdrawable: num(state.account.withdrawable),
     total_position_notional: num(state.account.total_position_notional),
     total_margin_used: num(state.account.total_margin_used),

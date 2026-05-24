@@ -384,6 +384,40 @@ h3 {
   border-bottom: 1px solid var(--line);
 }
 
+.symbol-pnl-reconcile {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.symbol-pnl-reconcile div,
+.symbol-pnl-reconcile em {
+  min-width: 0;
+  border: 1px solid rgba(153, 179, 204, 0.12);
+  border-radius: 8px;
+  padding: 9px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.symbol-pnl-reconcile span,
+.symbol-pnl-reconcile em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.symbol-pnl-reconcile strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 16px;
+}
+
+.symbol-pnl-reconcile em {
+  grid-column: 1 / -1;
+  padding: 7px 9px;
+}
+
 .symbol-pnl-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -405,6 +439,11 @@ h3 {
 
 .symbol-pnl-row.negative {
   border-color: rgba(255, 88, 116, 0.22);
+}
+
+.symbol-pnl-row.reconcile {
+  border-style: dashed;
+  background: rgba(255, 202, 92, 0.045);
 }
 
 .symbol-pnl-main {
@@ -1355,6 +1394,10 @@ td {
   }
 
   .symbol-pnl-list {
+    grid-template-columns: 1fr;
+  }
+
+  .symbol-pnl-reconcile {
     grid-template-columns: 1fr;
   }
 

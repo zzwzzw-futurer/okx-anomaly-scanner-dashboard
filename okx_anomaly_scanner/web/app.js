@@ -738,7 +738,8 @@ function coinPnlRowsFromPoint(row) {
 
 function buildSymbolPnlHistory(rows) {
   const byCoin = new Map();
-  filterPnlRows(rows).forEach((row) => {
+  const visibleRows = filterPnlRows(rows);
+  visibleRows.forEach((row) => {
     coinPnlRowsFromPoint(row).forEach((item) => {
       const coin = String(item.coin || "").toUpperCase();
       if (!coin) return;
@@ -771,12 +772,51 @@ function buildSymbolPnlHistory(rows) {
       record.latest = entry;
     });
   });
-  return Array.from(byCoin.values())
+  const records = Array.from(byCoin.values())
     .map((record) => ({
       ...record,
       latest: record.latest || record.series.at(-1) || {},
     }))
     .sort((a, b) => Math.abs(finiteNumber(b.latest.total_pnl)) - Math.abs(finiteNumber(a.latest.total_pnl)));
+  const latest = visibleRows.at(-1) || rows.at(-1) || {};
+  const symbolTotal = records.reduce((sum, record) => sum + finiteNumber(record.latest.total_pnl), 0);
+  const accountTotal = finiteNumber(latest.total_pnl);
+  const residualSeries = visibleRows
+    .filter((row) => Number.isFinite(Number(row.ts)))
+    .map((row) => {
+      const coinTotal = coinPnlRowsFromPoint(row).reduce((sum, item) => sum + finiteNumber(item.total_pnl ?? item.net_pnl ?? item.gross_pnl), 0);
+      return {
+        ts: Number(row.ts),
+        iso_ts: row.iso_ts,
+        total_pnl: finiteNumber(row.total_pnl) - coinTotal,
+      };
+    });
+  const residual = accountTotal - symbolTotal;
+  const residualRecord = {
+    coin: "未归因差额",
+    kind: "reconciliation",
+    latest: {
+      ts: Number(latest.ts),
+      iso_ts: latest.iso_ts,
+      total_pnl: residual,
+      realized_pnl: 0,
+      unrealized_pnl: 0,
+      fees: 0,
+      fills_count: 0,
+      position_value: 0,
+      side: "reconcile",
+      size: 0,
+    },
+    series: residualSeries,
+  };
+  return {
+    records,
+    residualRecord,
+    accountTotal,
+    symbolTotal,
+    residual,
+    latest,
+  };
 }
 
 function pnlSparkline(series) {
@@ -810,21 +850,43 @@ function pnlSparkline(series) {
 
 function renderSymbolPnl(rows) {
   const box = $("testnetSymbolPnl");
+  const reconcileBox = $("testnetSymbolPnlReconcile");
   if (!box) return;
-  const records = buildSymbolPnlHistory(rows);
+  const { records, residualRecord, accountTotal, symbolTotal, residual } = buildSymbolPnlHistory(rows);
+  if (reconcileBox) {
+    reconcileBox.innerHTML = `
+      <div>
+        <span>账户总盈亏</span>
+        <strong class="${accountTotal >= 0 ? "up-text" : "down-text"}">${accountTotal >= 0 ? "+" : ""}${fmtNum(accountTotal)}</strong>
+      </div>
+      <div>
+        <span>交易对合计</span>
+        <strong class="${symbolTotal >= 0 ? "up-text" : "down-text"}">${symbolTotal >= 0 ? "+" : ""}${fmtNum(symbolTotal)}</strong>
+      </div>
+      <div>
+        <span>未归因差额</span>
+        <strong class="${residual >= 0 ? "up-text" : "down-text"}">${residual >= 0 ? "+" : ""}${fmtNum(residual)}</strong>
+      </div>
+      <em>交易对合计 + 未归因差额 = 账户总盈亏</em>
+    `;
+  }
   if (!records.length) {
     box.innerHTML = `<div class="empty compact-empty">暂无交易对盈亏快照；下一次账户同步后会继续累积。</div>`;
     return;
   }
-  box.innerHTML = records
+  const displayRecords = Math.abs(residual) > 0.01 ? [...records, residualRecord] : records;
+  box.innerHTML = displayRecords
     .slice(0, 12)
     .map((record) => {
       const latest = record.latest || {};
       const total = finiteNumber(latest.total_pnl);
       const tone = total >= 0 ? "positive" : "negative";
-      const side = latest.side ? `${String(latest.side).toUpperCase()}${latest.size ? ` ${fmtNum(latest.size, 6)}` : ""}` : "无持仓";
+      const isResidual = record.kind === "reconciliation";
+      const side = isResidual
+        ? "基准前权益变化 / funding / 账户调整 / 历史缺口"
+        : latest.side ? `${String(latest.side).toUpperCase()}${latest.size ? ` ${fmtNum(latest.size, 6)}` : ""}` : "无持仓";
       return `
-        <article class="symbol-pnl-row ${tone}">
+        <article class="symbol-pnl-row ${tone} ${isResidual ? "reconcile" : ""}">
           <div class="symbol-pnl-main">
             <div>
               <strong>${escapeHtml(record.coin)}</strong>
@@ -834,12 +896,20 @@ function renderSymbolPnl(rows) {
           </div>
           <div class="symbol-pnl-chart">${pnlSparkline(record.series)}</div>
           <div class="symbol-pnl-metrics">
-            <span>已实现 <b>${fmtNum(latest.realized_pnl)}</b></span>
-            <span>未实现 <b class="${finiteNumber(latest.unrealized_pnl) >= 0 ? "up-text" : "down-text"}">${finiteNumber(latest.unrealized_pnl) >= 0 ? "+" : ""}${fmtNum(latest.unrealized_pnl)}</b></span>
-            <span>手续费 <b>${fmtNum(latest.fees)}</b></span>
-            <span>名义 <b>${fmtNum(latest.position_value)}</b></span>
-            <span>成交 <b>${fmtNum(latest.fills_count, 0)}</b></span>
-            <span>最近成交 <b>${latest.last_fill_iso ? fmtTime(latest.last_fill_iso) : "--"}</b></span>
+            ${isResidual
+              ? `
+                <span>说明 <b>账户级差额</b></span>
+                <span>来源 <b>非单币种回读</b></span>
+                <span>用途 <b>对齐总盈亏</b></span>
+              `
+              : `
+                <span>已实现 <b>${fmtNum(latest.realized_pnl)}</b></span>
+                <span>未实现 <b class="${finiteNumber(latest.unrealized_pnl) >= 0 ? "up-text" : "down-text"}">${finiteNumber(latest.unrealized_pnl) >= 0 ? "+" : ""}${fmtNum(latest.unrealized_pnl)}</b></span>
+                <span>手续费 <b>${fmtNum(latest.fees)}</b></span>
+                <span>名义 <b>${fmtNum(latest.position_value)}</b></span>
+                <span>成交 <b>${fmtNum(latest.fills_count, 0)}</b></span>
+                <span>最近成交 <b>${latest.last_fill_iso ? fmtTime(latest.last_fill_iso) : "--"}</b></span>
+              `}
           </div>
         </article>
       `;
